@@ -1,0 +1,48 @@
+/* Spécifique à la page joueur */
+.player-top { display: flex; align-items: center; justify-content: space-between; padding: 4px 2px 2px; }
+.form-card { display: grid; gap: 20px; }
+.form-card .error-slot:empty { display: none; }
+.pay-cta { font-size: 20px; }
+.confirm-hero h2 { text-transform: none; font-family: var(--font); font-weight: 800; font-size: 26px; line-height: 1.2; letter-spacing: -0.01em; }
+.pay-step { display: grid; gap: 14px; }
+.pay-step p { font-size: 17px; font-weight: 600; }
+.players-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; gap: 12px; }
+@media (max-width: 340px) { .players { grid-template-columns: 1fr; } }
+
+/* ---------- v2 : abonnés, identité, montant ---------- */
+fieldset.plain { border: 0; margin: 0; padding: 0; min-width: 0; }
+fieldset.plain > legend { padding: 0; margin-bottom: 8px; }
+.chip-sub { color: var(--muted); font-weight: 600; }
+
+.sub-choice .pay-option label { min-height: 58px; padding: 10px; }
+.sub-choice .pay-option .t { font-size: 15px; }
+
+.identity {
+  display: grid; gap: 10px;
+  padding: 16px; border-radius: var(--r);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+}
+.identity-hello { font-size: 20px; font-weight: 800; }
+.identity-line { margin-top: 4px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.identity-actions { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-left: -8px; }
+.identity-actions .btn-link { font-size: 14px; padding: 4px 8px; }
+.tag-prio {
+  display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+}
+
+.code-input { letter-spacing: 0.5em; font-size: 24px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
+
+.amount { display: grid; justify-items: center; gap: 2px; text-align: center; padding: 18px; }
+.amount-label { color: var(--muted); font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+.amount-value { font-family: var(--display); font-weight: 800; font-size: 52px; line-height: 1; }
+.amount-tier { font-size: 14px; font-weight: 700; color: var(--accent); }
+
+.congrats { text-align: center; background: linear-gradient(180deg, rgba(39,212,107,0.18), rgba(39,212,107,0.06)); border-color: var(--accent-line); display: grid; gap: 4px; }
+.congrats-title { font-family: var(--display); font-size: 30px; font-weight: 800; text-transform: uppercase; }
+
+.code-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.code-value {
+  font-family: var(--display); font-size: 34px; font-weight: 800; letter-spacing: 0.12em;
+  padding: 6px 14px; border-radius: 14px; background: var(--bg-2); border: 1px dashed var(--line);
+}

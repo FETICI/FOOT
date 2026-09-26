@@ -1,0 +1,16 @@
+{
+  "name": "foot-du-vendredi",
+  "version": "1.0.0",
+  "description": "Inscriptions au foot du vendredi : page joueur sans compte + espace administrateur.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/api.test.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "UNLICENSED"
+}

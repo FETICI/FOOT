@@ -209,7 +209,7 @@
           c.payment_link
             ? h('a.btn.btn-primary.btn-xl.btn-block.pay-cta', { href: c.payment_link, target: '_blank', rel: 'noopener noreferrer' },
                 [icon('card'), `Payer par carte · ${F.price(c.price_cents)}`])
-            : h('div.alert.info', [h('span.ico', 'ℹ️'), h('span', 'Le lien de paiement n’est pas encore disponible. L’organisateur te l’enverra sur WhatsApp.')]),
+            : h('div.alert.warn', { role: 'note' }, [h('span.ico', 'ℹ️'), h('span', 'Le paiement par carte n’est pas encore disponible pour ce tarif. Merci de payer en espèces ou de contacter l’organisateur.')]),
         ])
       : h('div.alert.warn', { role: 'note' }, [
           h('span.ico', '⚠️'),
@@ -230,7 +230,7 @@
         h('p', [`Ton match est à `, h('b', F.price(c.price_cents)), '.']),
       ]) : null,
       h('section.card.amount', [
-        h('span.amount-label', 'Montant à régler'),
+        h('span.amount-label', isCard ? 'Montant à régler' : 'À régler en espèces'),
         h('span.amount-value.num', F.price(c.price_cents)),
         h('span.amount-tier', c.subscriber ? 'Tarif abonné' : 'Tarif normal'),
       ]),
@@ -417,7 +417,7 @@
         state.showCode = true;
         state.error = err.message;
         render();
-        setTimeout(() => document.getElementById(err.error === 'name_taken' && !state.form.code ? 'first-name' : 'player-code')?.focus(), 30);
+        setTimeout(() => { const el = document.getElementById('player-code'); if (el && document.activeElement !== el && !el.value) el.focus(); }, 30);
         break;
       case 'bad_code':
         state.error = err.message;

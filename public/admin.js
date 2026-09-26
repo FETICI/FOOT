@@ -488,7 +488,9 @@
     if (!w) return [];
     const out = [];
     if (w.default_password) out.push(alertBox('warn', '🔐', ['Mot de passe provisoire (« foot2026 ») encore actif. ', h('a', { href: '#/settings' }, 'Le changer')]));
-    if (w.missing_payment_link) out.push(alertBox('info', '💳', ['Ajoute ton lien de paiement par carte pour que les joueurs puissent régler. ', h('a', { href: '#/settings' }, 'Réglages')]));
+    if (w.missing_card_links && w.missing_card_links.length) {
+      out.push(alertBox('info', '💳', [`Lien de paiement ${w.missing_card_links.map((c) => euros(c)).join(' et ')} manquant : les joueurs concernés ne pourront pas payer par carte. `, h('a', { href: '#/settings' }, 'Réglages')]));
+    }
     return out;
   }
 
@@ -520,8 +522,11 @@
     const parts = [...warnings(warn), head, statCards(v)];
     if (!m.is_past) {
       parts.push(h('div.split', [shareCard(v, rerender), phaseCard(v, rerender)]));
-      if (!m.effective_payment_link) {
-        parts.push(alertBox('info', '💳', ['Aucun lien de paiement pour ce match : les joueurs « carte » verront un message d’attente. ', h('a', { href: `#/edit/${m.id}` }, 'Ajouter un lien')]));
+      const odd = [m.price_cents, m.subscriber_price_cents].filter((c) => c > 0 && c !== 500 && c !== 1000);
+      if (odd.length) {
+        parts.push(alertBox('warn', '💳', `Tarif ${odd.map((c) => euros(c)).join(' / ')} : aucun lien bancaire ne correspond à ce montant (liens disponibles : 5 € et 10 €). Les joueurs concernés devront payer en espèces.`));
+      } else if (m.missing_card_links && m.missing_card_links.length && !warn) {
+        parts.push(alertBox('info', '💳', [`Lien de paiement ${m.missing_card_links.map((c) => euros(c)).join(' et ')} manquant. `, h('a', { href: '#/settings' }, 'Réglages')]));
       }
     } else {
       parts.push(revenueCard(v));
@@ -620,7 +625,6 @@
       price: input('price', { type: 'number', value: String(data.price_cents / 100), min: 0, step: 0.5, inputmode: 'decimal', required: true }),
       subPrice: input('sub_price', { type: 'number', value: String((data.subscriber_price_cents ?? 500) / 100), min: 0, step: 0.5, inputmode: 'decimal', required: true }),
       capacity: input('capacity', { type: 'number', value: String(data.capacity), min: 1, max: 200, inputmode: 'numeric', required: true }),
-      link: input('payment_link', { type: 'url', value: data.payment_link || '', placeholder: 'https://… (lien fourni par ta banque)', inputmode: 'url', autocomplete: 'off' }),
     };
     const segs = h('div.segments');
     const drawSegs = () => segs.replaceChildren(...['priority', 'open', 'invite', 'draft'].concat(editing ? ['closed'] : []).map((value) =>
@@ -644,7 +648,6 @@
           price_cents: toCents(f.price.value),
           subscriber_price_cents: toCents(f.subPrice.value),
           capacity: parseInt(f.capacity.value, 10),
-          payment_link: f.link.value.trim(),
           status,
         };
         await withBusy(submit, async () => {
@@ -662,7 +665,7 @@
       field('Lieu', f.location),
       h('div.grid-2', [euroField('Prix non abonné', f.price), euroField('Prix abonné', f.subPrice)]),
       field('Joueurs max', f.capacity),
-      field('Lien de paiement par carte', f.link, 'Lien réutilisable de ta banque. Laisse vide pour utiliser celui des Réglages.'),
+      h('p.hint', 'Paiement carte : le lien 5 € ou 10 € des Réglages est choisi automatiquement selon le tarif de chaque joueur.'),
       h('div.field', [h('span.label', 'Phase des inscriptions'), segs, h('p.hint', 'Les 3 liens (Prioritaires, Ouvert, Invitations) sont générés automatiquement à la publication.')]),
       err,
       submit,
@@ -936,25 +939,28 @@
     loading('settings');
     const s = await api('GET', '/api/admin/settings');
 
-    // Lien de paiement
-    const link = h('input.input', { id: 's-link', type: 'url', value: s.default_payment_link, placeholder: 'https://…', inputmode: 'url', autocomplete: 'off' });
+    // Liens de paiement par montant
+    const linkInput = (cents) => h('input.input', { id: `s-link-${cents}`, type: 'url', value: s.payment_links[cents] || '', placeholder: 'https://…', inputmode: 'url', autocomplete: 'off' });
+    const l5 = linkInput(500);
+    const l10 = linkInput(1000);
     const linkErr = h('div');
-    const linkBtn = h('button.btn.btn-primary.btn-block', { type: 'submit' }, 'Enregistrer le lien');
+    const linkBtn = h('button.btn.btn-primary.btn-block', { type: 'submit' }, 'Enregistrer les liens');
     const linkForm = h('form.card.stack', {
       onsubmit: async (e) => {
         e.preventDefault();
         await withBusy(linkBtn, async () => {
           try {
-            await api('PATCH', '/api/admin/settings', { default_payment_link: link.value, apply_to_upcoming: linkForm.querySelector('#s-apply').checked });
-            linkErr.replaceChildren(); toast('Lien enregistré ✅');
+            await api('PATCH', '/api/admin/settings', { payment_links: { 500: l5.value, 1000: l10.value } });
+            linkErr.replaceChildren(); toast('Liens enregistrés ✅');
           } catch (e2) { linkErr.replaceChildren(errorBox(e2.message)); }
         })();
       },
     }, [
-      h('h2.section-title', 'Paiement'),
-      h('div.field', [h('label.label', { for: 's-link' }, 'Lien de paiement par carte'), link,
-        h('p.hint', 'Lien réutilisable fourni par ta banque. Affiché aux joueurs qui choisissent « carte », avec leur montant personnel (5 € ou 10 €).')]),
-      switchRow('s-apply', 'Appliquer aussi aux matchs à venir', true),
+      h('h2.section-title', 'Paiement par carte'),
+      h('p.hint', 'Le site choisit automatiquement le bon lien selon le tarif calculé pour chaque joueur. Sans lien pour un montant, le joueur est invité à payer en espèces.'),
+      h('div.field', [h('label.label', { for: 's-link-500' }, 'Lien de paiement 5 €'), l5, h('p.hint', 'Abonnés annuels et fidélité.')]),
+      h('div.field', [h('label.label', { for: 's-link-1000' }, 'Lien de paiement 10 €'), l10, h('p.hint', 'Non abonnés.')]),
+      s.legacy_payment_link ? alertBox('info', 'ℹ️', ['Ancien lien unique (plus utilisé) : ', h('span', { style: 'word-break:break-all' }, s.legacy_payment_link)]) : null,
       linkErr, linkBtn,
     ]);
 

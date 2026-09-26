@@ -536,3 +536,122 @@ test('en-têtes de sécurité et prénoms malveillants stockés tels quels (rend
   const src = ['player.js', 'admin.js', 'common.js'].map((f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8')).join('\n');
   assert.ok(!/innerHTML\s*=\s*(?!v;)/.test(src.replace(/el\.innerHTML = v; \/\/ réservé aux icônes SVG internes/, '')), 'innerHTML réservé aux icônes internes');
 });
+
+/* =========================================================
+   Liens de paiement 5 € / 10 € choisis par le serveur
+   ========================================================= */
+
+const L5 = 'https://banque.example/pay/cinq-euros';
+const L10 = 'https://banque.example/pay/dix-euros';
+
+async function withLinks(t, links = { 500: L5, 1000: L10 }) {
+  const ctx = await setup(t);
+  const r = await ctx.admin('PATCH', '/api/admin/settings', { payment_links: links });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const m = await newMatch(ctx.admin, { status: 'open' });
+  const tok = m.links.find((l) => l.level === 'open').token;
+  const signup = (name, extra = {}) => reg(ctx.client(), m.match.id, {
+    link_token: tok, first_name: name, player_code: ctx.P(name)?.code, ...extra,
+  });
+  return { ...ctx, m, tok, signup };
+}
+
+test('lien carte : 5 € pour abonnés annuels, fidélité et fidélité acquise ; 10 € pour les autres', async (t) => {
+  const { signup } = await withLinks(t);
+  const cases = [
+    ['Thomas', 500, L5],   // abonné annuel
+    ['Hugo', 500, L5],     // abonné fidélité
+    ['Antoine', 500, L5],  // 5 participations → 6e inscription
+    ['Lucas', 1000, L10],  // 3 participations
+    ['Maxime', 1000, L10], // 4 participations
+    ['Inconnu', 1000, L10],
+  ];
+  for (const [name, price, link] of cases) {
+    const r = await signup(name);
+    assert.equal(r.status, 201, `${name} ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.registration.price_cents, price, name);
+    assert.equal(r.body.payment_link, link, name);
+  }
+});
+
+test('lien carte : impossible de forcer le tarif ou le lien depuis le navigateur', async (t) => {
+  const { signup, admin, m } = await withLinks(t);
+  const r = await signup('Tricheur', {
+    price_cents: 500, amount: 5, tier: 'annual', subscription: 'annual', payment_link: L5, payment_status: 'paid',
+  });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.registration.price_cents, 1000);
+  assert.equal(r.body.payment_link, L10);
+  const v = (await admin('GET', `/api/admin/matches/${m.match.id}`)).body.registrations.find((x) => x.first_name === 'Tricheur');
+  assert.equal(v.price_cents, 1000);
+  assert.equal(v.payment_status, 'to_pay');
+});
+
+test('lien carte : lien manquant → aucun lien, jamais celui de l’autre montant', async (t) => {
+  // Lien 5 € absent
+  let ctx = await withLinks(t, { 500: '', 1000: L10 });
+  let r = await ctx.signup('Thomas');
+  assert.equal(r.body.registration.price_cents, 500);
+  assert.equal(r.body.payment_link, '');
+  r = await ctx.signup('Lucas');
+  assert.equal(r.body.payment_link, L10);
+  const ov = (await ctx.admin('GET', '/api/admin/overview')).body;
+  assert.deepEqual(ov.warnings.missing_card_links, [500]);
+
+  // Lien 10 € absent
+  ctx = await withLinks(t, { 500: L5, 1000: '' });
+  r = await ctx.signup('Lucas');
+  assert.equal(r.body.registration.price_cents, 1000);
+  assert.equal(r.body.payment_link, '');
+  r = await ctx.signup('Thomas');
+  assert.equal(r.body.payment_link, L5);
+});
+
+test('lien carte : aucun lien pour un paiement en espèces, ni dans la confirmation retrouvée', async (t) => {
+  const { client, m, tok, P } = await withLinks(t);
+  const phone = client();
+  const r = await reg(phone, m.match.id, { link_token: tok, first_name: 'Thomas', player_code: P('Thomas').code, payment_method: 'cash' });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.payment_link, '');
+  assert.ok(!r.text.includes(L5) && !r.text.includes(L10));
+  const again = await phone.call('GET', `/api/public/links/${tok}`);
+  assert.equal(again.body.me.registration.payment_link, '');
+  assert.equal(again.body.me.registration.price_cents, 500);
+});
+
+test('lien carte : jamais exposé aux autres, et tarif historique conservé', async (t) => {
+  const { client, admin, m, tok, P } = await withLinks(t);
+  // Un visiteur non inscrit ne voit aucun lien bancaire
+  for (const url of ['/api/public/match', `/api/public/links/${tok}`, `/api/public/matches/${m.match.id}`]) {
+    const x = await client().call('GET', url);
+    assert.ok(!x.text.includes(L5) && !x.text.includes(L10), url);
+  }
+  // Lucas s'inscrit à 10 € puis devient abonné : l'ancien match garde 10 € et le lien 10 €
+  const lucasPhone = client();
+  let r = await reg(lucasPhone, m.match.id, { link_token: tok, first_name: 'Lucas', player_code: P('Lucas').code });
+  assert.equal(r.body.payment_link, L10);
+  await admin('PATCH', `/api/admin/players/${P('Lucas').id}`, { subscription: 'loyalty' });
+  const old = await lucasPhone.call('GET', `/api/public/links/${tok}`);
+  assert.equal(old.body.me.registration.price_cents, 1000);
+  assert.equal(old.body.me.registration.payment_link, L10);
+  const hist = (await admin('GET', `/api/admin/players/${P('Lucas').id}`)).body.history.find((x) => x.match_id === m.match.id);
+  assert.equal(hist.price_cents, 1000);
+  // Match suivant : nouveau tarif 5 € et lien 5 €
+  const m2 = await newMatch(admin, { status: 'open', date: '2099-06-12' });
+  r = await reg(lucasPhone, m2.match.id, { link_token: m2.links.find((l) => l.level === 'open').token });
+  assert.equal(r.body.registration.price_cents, 500);
+  assert.equal(r.body.payment_link, L5);
+});
+
+test('réglages des liens : https obligatoire, liens différents, admin uniquement', async (t) => {
+  const { admin, client } = await setup(t);
+  assert.equal((await admin('PATCH', '/api/admin/settings', { payment_links: { 500: 'http://pas-securise.fr' } })).status, 400);
+  assert.equal((await admin('PATCH', '/api/admin/settings', { payment_links: { 500: L5, 1000: L5 } })).status, 400);
+  assert.equal((await admin('PATCH', '/api/admin/settings', { payment_links: { 500: L5, 1000: L10 } })).status, 200);
+  const s = (await admin('GET', '/api/admin/settings')).body;
+  assert.equal(s.payment_links['500'], L5);
+  assert.equal(s.payment_links['1000'], L10);
+  const anon = client();
+  assert.equal((await anon.call('PATCH', '/api/admin/settings', { payment_links: { 1000: L5 } })).status, 401);
+  assert.equal((await anon.call('GET', '/api/admin/settings')).status, 401);
+});

@@ -12,6 +12,8 @@ const STATUSES = ['draft', 'priority', 'open', 'invite', 'closed'];
 const METHODS = ['card', 'cash'];
 const PAY_STATUSES = ['to_pay', 'paid', 'cash_due'];
 const ATTENDANCES = ['unknown', 'present', 'absent'];
+/** Montants (centimes) pour lesquels l'organisateur renseigne un lien bancaire réutilisable. */
+const PAYMENT_LINK_AMOUNTS = [500, 1000];
 
 class AppError extends Error {
   constructor(status, code, message, extra = {}) {
@@ -113,8 +115,18 @@ function createRepo(db) {
     return LINK_LEVELS.map((level) => ({ level, token: map[level], active: linkActive(match.status, level) }));
   }
 
-  function effectivePaymentLink(match) {
-    return (match.payment_link || '').trim() || getSetting(db, 'default_payment_link', '');
+  /**
+   * Lien bancaire correspondant EXACTEMENT au montant enregistré sur l'inscription.
+   * Jamais de repli sur un autre montant : pas de lien configuré pour ce montant → aucun lien.
+   */
+  function paymentLinkFor(priceCents) {
+    if (!PAYMENT_LINK_AMOUNTS.includes(priceCents)) return '';
+    return (getSetting(db, `payment_link_${priceCents}`, '') || '').trim();
+  }
+
+  /** Montants de ce match pour lesquels aucun lien carte n'est disponible. */
+  function missingCardLinks(match) {
+    return [...new Set([match.subscriber_price_cents, match.price_cents])].filter((c) => c > 0 && !paymentLinkFor(c));
   }
 
   function statsFor(match, regs) {
@@ -145,7 +157,7 @@ function createRepo(db) {
       match: {
         ...match,
         is_past: match.date < today(),
-        effective_payment_link: effectivePaymentLink(match),
+        missing_card_links: missingCardLinks(match),
         season_name: season ? season.name : null,
       },
       links: linksOf(match),
@@ -207,7 +219,7 @@ function createRepo(db) {
         payment_method: reg.payment_method,
         price_cents: reg.price_cents,
         tier: reg.tier,
-        payment_link: reg.payment_method === 'card' ? effectivePaymentLink(match) : '',
+        payment_link: reg.payment_method === 'card' ? paymentLinkFor(reg.price_cents) : '',
       } : null,
     };
   }
@@ -432,7 +444,7 @@ function createRepo(db) {
             subscriber: pricing.tier !== 'standard',
             player_code: p.code,
           },
-          payment_link: method === 'card' ? effectivePaymentLink(match) : '',
+          payment_link: method === 'card' ? paymentLinkFor(reg.price_cents) : '',
           current: publicMatchView(match),
         };
       });
@@ -509,7 +521,6 @@ function createRepo(db) {
         price_cents: last?.price_cents ?? 1000,
         subscriber_price_cents: last?.subscriber_price_cents ?? 500,
         capacity: last?.capacity ?? 14,
-        payment_link: last?.payment_link || getSetting(db, 'default_payment_link', ''),
         status: 'priority',
       };
     },
@@ -794,7 +805,8 @@ function createRepo(db) {
     },
 
     LOYALTY_THRESHOLD,
+    paymentLinkFor,
   };
 }
 
-module.exports = { createRepo, AppError, cleanFirstName };
+module.exports = { createRepo, AppError, cleanFirstName, PAYMENT_LINK_AMOUNTS };

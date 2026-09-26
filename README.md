@@ -12,7 +12,7 @@ Prérequis : **Node.js 22.13 ou plus récent**. Aucune dépendance, pas de `npm 
 
 ```bash
 npm start      # http://localhost:3000  et  http://localhost:3000/admin
-npm test       # 16 scénarios de tests automatiques
+npm test       # 22 scénarios de tests automatiques
 ```
 
 La base SQLite est créée dans `./data/foot.sqlite`. Une base existante (version précédente) est **migrée automatiquement** au démarrage, sans perte de données.
@@ -44,7 +44,14 @@ Les codes joueurs sont visibles dans *Admin → Joueurs → fiche*. Tout se supp
 - Non abonné → 10 € tant qu'il a moins de 5 participations validées.
 - 5 participations validées → la 6ᵉ inscription est à 5 € et le joueur devient automatiquement **Abonné fidélité** (5 € et prioritaire ensuite, pour toute la saison).
 - Le tarif est enregistré sur chaque inscription : l'historique financier ne change jamais après coup.
-- Les prix (normal / abonné) se règlent par match ; le lien bancaire externe reste inchangé et le statut de paiement se gère à la main.
+- Les prix (normal / abonné) se règlent par match ; le statut de paiement se gère à la main.
+
+**Paiement par carte : lien 5 € / lien 10 €** (*Réglages → Paiement par carte*)
+- Le serveur choisit le lien d'après le **montant enregistré sur l'inscription** : 5 € → lien 5 €, 10 € → lien 10 €. Le navigateur n'envoie jamais de montant ni de lien (toute valeur envoyée est ignorée).
+- Espèces : aucun lien, « À régler en espèces : 5 € / 10 € » + rappel d'arriver 5 minutes avant.
+- Lien manquant pour un montant (ou prix de match différent de 5 €/10 €) : aucun lien affiché, jamais celui de l'autre montant — message « Le paiement par carte n'est pas encore disponible pour ce tarif… ». L'admin est averti sur le tableau de bord.
+- Une ancienne inscription garde son montant et son lien, même si le joueur devient abonné ensuite.
+- Les liens ne sont transmis qu'au joueur concerné, après son inscription carte.
 
 **Phases et liens**
 | Phase | Liens acceptés | Qui peut s'inscrire |

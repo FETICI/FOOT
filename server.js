@@ -12,7 +12,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { openDatabase, seedDemo, getSetting, setSetting } = require('./src/db');
-const { createRepo, AppError } = require('./src/repo');
+const { createRepo, AppError, PAYMENT_LINK_AMOUNTS } = require('./src/repo');
 const { createAuth } = require('./src/auth');
 const { today } = require('./src/dates');
 
@@ -183,7 +183,7 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
     season: repo.currentSeason(),
     warnings: {
       default_password: auth.isDefaultPassword(),
-      missing_payment_link: !getSetting(db, 'default_payment_link', ''),
+      missing_card_links: PAYMENT_LINK_AMOUNTS.filter((c) => !repo.paymentLinkFor(c)),
       has_demo: repo.hasDemo(),
     },
   }), { admin: true });
@@ -213,24 +213,27 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
   route('POST', '/api/admin/seasons', ({ body }) => [201, { seasons: repo.startSeason(body) }], { admin: true });
 
   route('GET', '/api/admin/settings', () => ({
-    default_payment_link: getSetting(db, 'default_payment_link', ''),
+    payment_links: Object.fromEntries(PAYMENT_LINK_AMOUNTS.map((c) => [c, getSetting(db, `payment_link_${c}`, '')])),
+    legacy_payment_link: getSetting(db, 'default_payment_link', ''),
     default_password: auth.isDefaultPassword(),
     has_demo: repo.hasDemo(),
     seasons: repo.listSeasons(),
   }), { admin: true });
 
+  // Liens bancaires par montant (5 € et 10 €). Uniquement modifiables par l'organisateur.
   route('PATCH', '/api/admin/settings', ({ body }) => {
-    if (body.default_payment_link !== undefined) {
-      const l = String(body.default_payment_link).trim();
-      if (l && !/^https?:\/\/\S+$/i.test(l)) throw new AppError(400, 'invalid_link', 'Le lien de paiement doit commencer par https://');
+    const links = body.payment_links && typeof body.payment_links === 'object' ? body.payment_links : {};
+    const next = {};
+    for (const c of PAYMENT_LINK_AMOUNTS) {
+      const l = links[c] === undefined ? getSetting(db, `payment_link_${c}`, '') : String(links[c]).trim();
+      if (l && !/^https:\/\/\S+$/i.test(l)) throw new AppError(400, 'invalid_link', `Le lien ${c / 100} € doit commencer par https://`);
       if (l.length > 500) throw new AppError(400, 'invalid_link', 'Lien de paiement trop long.');
-      setSetting(db, 'default_payment_link', l);
-      // Applique le nouveau lien aux matchs à venir.
-      if (body.apply_to_upcoming) {
-        db.prepare('UPDATE matches SET payment_link = ? WHERE date >= ?').run(l, today());
-      }
+      next[c] = l;
     }
-    return { ok: true, default_payment_link: getSetting(db, 'default_payment_link', '') };
+    const vals = Object.values(next).filter(Boolean);
+    if (new Set(vals).size !== vals.length) throw new AppError(400, 'same_link', 'Les liens 5 € et 10 € doivent être différents.');
+    for (const c of PAYMENT_LINK_AMOUNTS) setSetting(db, `payment_link_${c}`, next[c]);
+    return { ok: true, payment_links: Object.fromEntries(PAYMENT_LINK_AMOUNTS.map((c) => [c, getSetting(db, `payment_link_${c}`, '')])) };
   }, { admin: true });
 
   route('POST', '/api/admin/password', ({ req, body }) => {

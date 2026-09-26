@@ -108,13 +108,8 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
     };
   }
   const registerLimit = rateLimiter(20, 10 * 60 * 1000);
-  const codeFailLimit = rateLimiter(8, 60 * 60 * 1000);   // essais de code joueur erronés
+  const lookupLimit = rateLimiter(30, 10 * 60 * 1000);
   const loginLimit = rateLimiter(10, 15 * 60 * 1000);
-
-  // Cookie « téléphone reconnu » : aléatoire, HttpOnly, seule son empreinte est stockée en base.
-  const DEVICE_COOKIE = 'fdv_player';
-  const deviceCookie = (req, value, maxAge) =>
-    `${DEVICE_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${isHttps(req) ? '; Secure' : ''}`;
 
   /* ---------- Routes ---------- */
 
@@ -130,38 +125,22 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
 
   // --- Public (joueurs) ---
   // Lien général : informations du prochain match uniquement (aucune inscription possible sans lien de phase).
-  route('GET', '/api/public/match', ({ devicePlayerId }) => repo.currentPublicMatch(devicePlayerId));
-  route('GET', '/api/public/matches/:id', ({ params, devicePlayerId }) => repo.publicMatch(params.id, devicePlayerId));
+  route('GET', '/api/public/match', () => repo.currentPublicMatch());
+  route('GET', '/api/public/matches/:id', ({ params }) => repo.publicMatch(params.id));
 
   // Lien d'inscription (Prioritaires / Ouvert / Invitations)
-  route('GET', '/api/public/links/:token', ({ params, devicePlayerId }) => repo.publicLink(params.token, devicePlayerId));
+  route('GET', '/api/public/links/:token', ({ params }) => repo.publicLink(params.token));
 
-  route('POST', '/api/public/matches/:id/registrations', async ({ req, params, body, devicePlayerId }) => {
-    const ip = clientIp(req);
-    if (!registerLimit(ip)) throw new AppError(429, 'rate_limited', 'Trop de tentatives, réessaie dans quelques minutes.');
-    if (body.player_code && !codeFailLimit(`peek:${ip}`, true)) {
-      throw new AppError(429, 'rate_limited', 'Trop de codes incorrects. Réessaie plus tard ou contacte l’organisateur.');
-    }
-    let out;
-    try {
-      out = repo.registerPublic(params.id, body, { devicePlayerId });
-    } catch (e) {
-      if (e instanceof AppError && e.extra && e.extra.code_failed) codeFailLimit(`peek:${ip}`);
-      throw e;
-    }
-    const headers = {};
-    // Le téléphone retient le joueur (sauf quand on inscrit quelqu'un d'autre)
-    if (body.as_other !== true && out.player_id !== devicePlayerId) {
-      headers['Set-Cookie'] = deviceCookie(req, repo.issueDevice(out.player_id), 400 * 86400);
-    }
-    delete out.player_id;
-    return [201, out, headers];
+  // Inscription : prénom + numéro de téléphone → fiche → tarif serveur → lien bancaire du montant
+  route('POST', '/api/public/matches/:id/registrations', async ({ req, params, body }) => {
+    if (!registerLimit(clientIp(req))) throw new AppError(429, 'rate_limited', 'Trop de tentatives, réessaie dans quelques minutes.');
+    return [201, repo.registerPublic(params.id, body)];
   });
 
-  // « Ce n'est pas moi » : le téléphone oublie le joueur
-  route('POST', '/api/public/forget', ({ req, deviceToken }) => {
-    repo.forgetDevice(deviceToken);
-    return [200, { ok: true }, { 'Set-Cookie': deviceCookie(req, '', 0) }];
+  // Retrouver sa propre confirmation (prénom + numéro), par ex. en rouvrant le lien
+  route('POST', '/api/public/matches/:id/lookup', async ({ req, params, body }) => {
+    if (!lookupLimit(clientIp(req))) throw new AppError(429, 'rate_limited', 'Trop de tentatives, réessaie dans quelques minutes.');
+    return repo.lookupPublic(params.id, body);
   });
 
   // --- Administration ---
@@ -185,6 +164,13 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
       default_password: auth.isDefaultPassword(),
       missing_card_links: PAYMENT_LINK_AMOUNTS.filter((c) => !repo.paymentLinkFor(c)),
       has_demo: repo.hasDemo(),
+      ...(() => {
+        const ps = repo.listPlayers();
+        return {
+          players_to_review: ps.filter((p) => p.needs_review).length,
+          subscribers_without_phone: ps.filter((p) => p.subscriber && p.missing_phone).length,
+        };
+      })(),
     },
   }), { admin: true });
 
@@ -206,7 +192,7 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
   route('GET', '/api/admin/players/:id', ({ params }) => repo.playerDetail(params.id), { admin: true });
   route('PATCH', '/api/admin/players/:id', ({ params, body }) => repo.updatePlayer(params.id, body), { admin: true });
   route('DELETE', '/api/admin/players/:id', ({ params }) => (repo.deletePlayer(params.id), { ok: true }), { admin: true });
-  route('POST', '/api/admin/players/:id/merge', ({ params, body }) => repo.mergePlayers(params.id, Number(body.into_player_id)), { admin: true });
+  route('POST', '/api/admin/players/:id/merge', ({ params, body }) => repo.mergePlayers(params.id, Number(body.into_player_id), { phoneFrom: body.phone_from === 'source' ? 'source' : 'target' }), { admin: true });
 
   // Saisons
   route('GET', '/api/admin/seasons', () => ({ seasons: repo.listSeasons() }), { admin: true });
@@ -289,10 +275,7 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
       if (!r) throw new AppError(404, 'not_found', 'Ressource introuvable.');
       const m = pathname.match(r.re);
       const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
-      const jar = cookies(req);
-      const isAdmin = auth.check(jar[auth.COOKIE]);
-      const deviceToken = jar[DEVICE_COOKIE] || null;
-      const devicePlayerId = repo.playerFromDevice(deviceToken);
+      const isAdmin = auth.check(cookies(req)[auth.COOKIE]);
       if (r.admin && !isAdmin) throw new AppError(401, 'unauthorized', 'Connexion requise.');
 
       // Protection CSRF : les écritures doivent être des requêtes JSON émises par nos pages.
@@ -304,7 +287,7 @@ function createApp({ dbFile = path.join(DATA_DIR, 'foot.sqlite'), seed = process
         body = await readJson(req);
       }
 
-      const out = await r.handler({ req, res, url, params, body, isAdmin, deviceToken, devicePlayerId });
+      const out = await r.handler({ req, res, url, params, body, isAdmin });
       if (Array.isArray(out)) send(res, out[0], out[1], out[2]);
       else send(res, 200, out);
     } catch (e) {

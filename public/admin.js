@@ -165,15 +165,33 @@
     return h(`span.badge.sub-${sub}`, SUB_LABEL[sub]);
   }
 
+  /** Numéro affiché (admin uniquement) ou badge « Numéro à renseigner ». */
+  function phoneBadge(p) {
+    return p.missing_phone ? h('span.badge.no-phone', 'Numéro à renseigner') : h('span.phone.num', p.phone_display);
+  }
+
+  /** Recherche par prénom ou par chiffres du numéro (06 12…, 612…, +33…). */
+  function matchesQuery(p, q) {
+    if (!q) return true;
+    if (p.first_name.toLowerCase().includes(q.toLowerCase())) return true;
+    const digits = q.replace(/\D/g, '');
+    if (digits.length < 2 || !p.phone) return false;
+    const national = p.phone.startsWith('+33') ? `0${p.phone.slice(3)}` : p.phone.replace('+', '');
+    return national.includes(digits) || p.phone.replace('+', '').includes(digits);
+  }
+
   /* ---------- Ajouter un joueur au match (fiche existante ou nouvelle) ---------- */
   function addPlayerSheet(v, onDone) {
     const inMatch = new Set(v.registrations.map((r) => r.player_id));
     openSheet((close) => {
       let players = [];
       let selected = null; // { id, first_name } ou { new: 'Nom' }
-      const search = h('input.input', { id: 'add-name', placeholder: 'Rechercher ou saisir un prénom', maxlength: 30, autocapitalize: 'words', autocomplete: 'off' });
+      const search = h('input.input', { id: 'add-name', placeholder: 'Prénom ou numéro', maxlength: 30, autocapitalize: 'words', autocomplete: 'off' });
       const list = h('div.pick-list');
       const chosen = h('div');
+      const newPhone = h('input.input', { id: 'add-phone', type: 'tel', inputmode: 'tel', placeholder: '06 12 34 56 78 (conseillé)', maxlength: 20, autocomplete: 'off' });
+      const newPhoneField = h('div.field', { hidden: true }, [h('label.label', { for: 'add-phone' }, 'Téléphone du nouveau joueur'), newPhone,
+        h('p.hint', 'Sans numéro, la fiche sera « Numéro à renseigner ».')]);
       const err = h('div');
       const submit = h('button.btn.btn-primary.btn-block', { type: 'submit' }, [icon('plus'), 'Ajouter au match']);
 
@@ -182,16 +200,17 @@
           ? alertBox('ok', selected.id ? '👤' : '✨', selected.id
             ? `Fiche existante : ${selected.first_name} — ${selected.label} · ${euros(selected.price_cents)}`
             : `Nouvelle fiche : « ${selected.new} » (non abonné)`)
-          : h('p.hint', 'Choisis une fiche existante (conseillé) ou crée un nouveau joueur.'));
+          : h('p.hint', 'Recherche par prénom ou par numéro. Choisis une fiche existante (conseillé) ou crée un nouveau joueur.'));
+        newPhoneField.hidden = !(selected && !selected.id);
       };
       const drawList = () => {
         const q = search.value.trim().toLowerCase();
-        const matches = players.filter((p) => !q || p.first_name.toLowerCase().includes(q)).slice(0, 8);
+        const matches = players.filter((p) => matchesQuery(p, search.value.trim())).slice(0, 8);
         const items = matches.map((p) => h('button.pick', {
           type: 'button', disabled: inMatch.has(p.id),
           onclick: () => { selected = p; drawChosen(); },
-        }, [h('span.pick-name', p.first_name), h('span.pick-meta', inMatch.has(p.id) ? 'déjà inscrit' : `${p.label} · ${euros(p.price_cents)}`)]));
-        if (q) items.push(h('button.pick.pick-new', { type: 'button', onclick: () => { selected = { new: search.value.trim() }; drawChosen(); } },
+        }, [h('span.pick-name', [p.first_name, h('small.pick-phone', p.missing_phone ? ' · sans numéro' : ` · ${p.phone_display}`)]), h('span.pick-meta', inMatch.has(p.id) ? 'déjà inscrit' : `${p.label} · ${euros(p.price_cents)}`)]));
+        if (q && /\p{L}/u.test(q)) items.push(h('button.pick.pick-new', { type: 'button', onclick: () => { selected = { new: search.value.trim() }; drawChosen(); } },
           [h('span.pick-name', ['+ Nouveau joueur « ', search.value.trim(), ' »'])]));
         list.replaceChildren(...items);
       };
@@ -209,7 +228,7 @@
           await withBusy(submit, async () => {
             try {
               const nv = await api('POST', `/api/admin/matches/${v.match.id}/registrations`, {
-                ...(selected.id ? { player_id: selected.id } : { first_name: selected.new }),
+                ...(selected.id ? { player_id: selected.id } : { first_name: selected.new, phone: newPhone.value.trim() || undefined }),
                 payment_method: method, ...(paid ? { payment_status: 'paid' } : {}),
               });
               close(); onDone(nv); toast('Joueur ajouté ✅');
@@ -218,6 +237,7 @@
         },
       }, [
         h('div.field', [h('label.label', { for: 'add-name' }, 'Joueur'), search, list, chosen]),
+        newPhoneField,
         h('div.field', [h('span.label', 'Mode de paiement'), methodChoice('add-m', '')]),
         switchRow('add-paid', 'Déjà payé', false),
         h('p.hint', 'Le tarif est calculé automatiquement selon la fiche du joueur.'),
@@ -488,6 +508,12 @@
     if (!w) return [];
     const out = [];
     if (w.default_password) out.push(alertBox('warn', '🔐', ['Mot de passe provisoire (« foot2026 ») encore actif. ', h('a', { href: '#/settings' }, 'Le changer')]));
+    if (w.players_to_review) {
+      out.push(alertBox('warn', '👥', [`${F.plural(w.players_to_review, 'fiche à vérifier', 'fiches à vérifier')} : possible doublon d’une ancienne fiche sans numéro. `, h('a', { href: '#/players', onclick: () => { ui.playerFilter = 'review'; } }, 'Voir')]));
+    }
+    if (w.subscribers_without_phone) {
+      out.push(alertBox('info', '📱', [`${F.plural(w.subscribers_without_phone, 'abonné sans numéro', 'abonnés sans numéro')} : ajoute leur numéro pour qu’ils soient reconnus (et paient 5 €). `, h('a', { href: '#/players', onclick: () => { ui.playerFilter = 'nophone'; } }, 'Compléter')]));
+    }
     if (w.missing_card_links && w.missing_card_links.length) {
       out.push(alertBox('info', '💳', [`Lien de paiement ${w.missing_card_links.map((c) => euros(c)).join(' et ')} manquant : les joueurs concernés ne pourront pas payer par carte. `, h('a', { href: '#/settings' }, 'Réglages')]));
     }
@@ -708,6 +734,7 @@
   function newPlayerSheet() {
     openSheet((close) => {
       const name = h('input.input', { id: 'np-name', placeholder: 'Prénom', maxlength: 30, autocapitalize: 'words', autocomplete: 'off' });
+      const phone = h('input.input', { id: 'np-phone', type: 'tel', inputmode: 'tel', placeholder: '06 12 34 56 78', maxlength: 20, autocomplete: 'off' });
       let sub = 'annual';
       const err = h('div');
       const submit = h('button.btn.btn-primary.btn-block', { type: 'submit' }, 'Créer la fiche');
@@ -716,15 +743,18 @@
           e.preventDefault();
           await withBusy(submit, async () => {
             try {
-              const d = await api('POST', '/api/admin/players', { first_name: name.value, subscription: sub });
+              const d = await api('POST', '/api/admin/players', { first_name: name.value, phone: phone.value.trim() || undefined, subscription: sub });
               close(); toast('Fiche créée ✅'); location.hash = `#/player/${d.player.id}`;
-            } catch (e2) { err.replaceChildren(errorBox(e2.message)); }
+            } catch (e2) {
+              err.replaceChildren(errorBox([e2.message, e2.other_player_id ? [' ', h('a', { href: `#/player/${e2.other_player_id}`, onclick: () => close() }, 'Ouvrir cette fiche')] : null]));
+            }
           })();
         },
       }, [
-        h('div.field', [h('label.label', { for: 'np-name' }, 'Prénom'), name, h('p.hint', 'Ajoute l’initiale en cas d’homonyme (ex. Thomas B.).')]),
+        h('div.field', [h('label.label', { for: 'np-name' }, 'Prénom'), name]),
+        h('div.field', [h('label.label', { for: 'np-phone' }, 'Numéro de téléphone'), phone,
+          h('p.hint', 'C’est grâce à ce numéro qu’il sera reconnu à l’inscription (tarif, priorité).')]),
         h('div.field', [h('span.label', 'Statut'), segmented([['annual', 'Abonné annuel'], ['none', 'Non abonné']], sub, (v) => { sub = v; })]),
-        h('p.hint', 'Tu recevras un code joueur à 4 chiffres à lui transmettre : il sera reconnu dès sa première inscription.'),
         err, submit,
       ]);
       setTimeout(() => name.focus(), 80);
@@ -746,20 +776,23 @@
       ['subs', 'Abonnés', (p) => p.subscriber],
       ['none', 'Non abonnés', (p) => !p.subscriber],
       ['eligible', 'Fidélité débloquée', (p) => p.loyalty_eligible],
+      ['nophone', 'Numéro à renseigner', (p) => p.missing_phone],
+      ['review', 'À vérifier', (p) => p.needs_review],
       ['homonyms', 'Homonymes', (p) => p.homonyms],
     ];
     const listEl = h('div.player-list');
-    const search = h('input.input.small', { type: 'search', placeholder: 'Rechercher un joueur', value: ui.playerSearch, autocomplete: 'off' });
+    const search = h('input.input.small', { type: 'search', placeholder: 'Rechercher (prénom ou numéro)', value: ui.playerSearch, autocomplete: 'off' });
     const filterBar = h('div.filters', { role: 'group' });
 
     const draw = () => {
       const f = filters.find((x) => x[0] === ui.playerFilter) || filters[0];
-      const q = ui.playerSearch.trim().toLowerCase();
-      const shown = players.filter((p) => f[2](p) && (!q || p.first_name.toLowerCase().includes(q)));
+      const q = ui.playerSearch.trim();
+      const shown = players.filter((p) => f[2](p) && matchesQuery(p, q));
       filterBar.replaceChildren(...filters.map(([k, l, fn]) => h('button', { type: 'button', 'aria-pressed': String(ui.playerFilter === k), onclick: () => { ui.playerFilter = k; draw(); } }, `${l} · ${players.filter(fn).length}`)));
       listEl.replaceChildren(...(shown.length ? shown.map((p) => h('a.player-item', { href: `#/player/${p.id}` }, [
         h('div.pi-main', [
-          h('div.pi-name', [p.first_name, p.homonyms ? h('span.badge.homo', 'homonyme') : null]),
+          h('div.pi-name', [p.first_name, p.needs_review ? h('span.badge.review', 'à vérifier') : p.homonyms ? h('span.badge.homo', 'homonyme') : null]),
+          h('div.pi-meta', [phoneBadge(p)]),
           h('div.pi-meta', [statusBadge(p.subscription), h('span', playerSummary(p))]),
           p.subscription === 'none' ? progressDots(p) : null,
         ]),
@@ -776,7 +809,7 @@
       h('header.page-head', [
         h('div.row.between', [h('p.eyebrow', `Saison ${season ? season.name : ''}`), h('button.btn.btn-sm', { type: 'button', onclick: newPlayerSheet }, [icon('plus'), 'Nouveau joueur'])]),
         h('h1', 'Joueurs'),
-        h('p.sub', `${counts.all} fiches · ${counts.subs} abonnés${counts.eligible ? ` · ${counts.eligible} fidélité débloquée` : ''}`),
+        h('p.sub', `${counts.all} fiches · ${counts.subs} abonnés${counts.eligible ? ` · ${counts.eligible} fidélité débloquée` : ''}${players.some((p) => p.missing_phone) ? ` · ${players.filter((p) => p.missing_phone).length} sans numéro` : ''}`),
       ]),
       h('section.card.stack', [search, filterBar, listEl]),
     ]);
@@ -832,33 +865,49 @@
       h('p.hint', `Présences enregistrées sur le site : ${p.present_season}${p.adjustment ? ` · correction manuelle : ${p.adjustment > 0 ? '+' : ''}${p.adjustment}` : ''}.`),
     ]);
 
-    // Identité : prénom, code joueur
+    // Identité : prénom et numéro de téléphone (identifiant unique)
     const nameInput = h('input.input.small', { value: p.first_name, maxlength: 30, autocapitalize: 'words', 'aria-label': 'Prénom' });
+    const phoneInput = h('input.input.small', { id: 'pd-phone', type: 'tel', inputmode: 'tel', value: p.phone_display, placeholder: '06 12 34 56 78', maxlength: 20, 'aria-label': 'Numéro de téléphone' });
+    const phoneErr = h('div');
+    const savePhone = async () => {
+      phoneErr.replaceChildren();
+      try {
+        await api('PATCH', `/api/admin/players/${p.id}`, { phone: phoneInput.value.trim() });
+        toast('Numéro enregistré ✅'); rerender();
+      } catch (e) {
+        phoneErr.replaceChildren(errorBox([e.message, e.other_player_id ? [' ', h('a', { href: `#/player/${e.other_player_id}` }, 'Ouvrir l’autre fiche')] : null]));
+      }
+    };
     const idCard = h('section.card.stack', [
       h('h2.section-title', 'Identité'),
-      h('div.row', [nameInput, h('button.btn.btn-sm', { type: 'button', onclick: () => { if (nameInput.value.trim() !== p.first_name) patch({ first_name: nameInput.value }, 'Prénom modifié'); } }, 'Renommer')]),
-      h('div.kv', [
-        h('div', [h('p.k', 'Code joueur'), h('p.hint', 'À lui transmettre pour être reconnu sur un nouveau téléphone.')]),
-        h('div.row', [
-          h('span.code-pill.num', p.code),
-          h('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: async () => { if (await copyText(p.code)) toast('Code copié ✅'); } }, [icon('copy')]),
-        ]),
-      ]),
-      h('div.row.wrap-x', [
-        h('button.btn-link', { type: 'button', onclick: async () => {
-          if (await confirmSheet({ title: 'Nouveau code ?', message: 'L’ancien code ne fonctionnera plus.', confirmLabel: 'Générer', danger: false })) patch({ regenerate_code: true }, 'Nouveau code généré');
-        } }, 'Générer un nouveau code'),
-        p.devices ? h('button.btn-link', { type: 'button', onclick: async () => {
-          if (await confirmSheet({ title: 'Oublier les téléphones ?', message: `${p.devices} téléphone(s) ne reconnaîtront plus ${p.first_name} automatiquement.`, confirmLabel: 'Oublier' })) patch({ forget_devices: true }, 'Téléphones oubliés');
-        } }, `Oublier ses téléphones (${p.devices})`) : null,
+      h('div.field', [h('span.label', 'Prénom'), h('div.row', [nameInput, h('button.btn.btn-sm', { type: 'button', onclick: () => { if (nameInput.value.trim() !== p.first_name) patch({ first_name: nameInput.value }, 'Prénom modifié'); } }, 'Renommer')])]),
+      h('div.field', [
+        h('span.label', ['Numéro de téléphone ', p.missing_phone ? h('span.badge.no-phone', 'Numéro à renseigner') : null]),
+        h('div.row', [phoneInput, h('button.btn.btn-sm', { type: 'button', onclick: savePhone }, 'Enregistrer')]),
+        h('p.hint', 'Identifiant unique du joueur : c’est ce numéro qu’il saisit pour s’inscrire.'),
+        phoneErr,
       ]),
     ]);
+
+    // Fiche à vérifier : créée avec un prénom porté par une ancienne fiche sans numéro
+    const legacy = d.homonyms.filter((x) => x.missing_phone);
+    const reviewCard = p.needs_review ? h('section.card.stack.review-card', [
+      h('h2.section-title', 'À vérifier'),
+      h('p', { style: 'color:var(--text-2)' }, `Cette fiche a été créée avec un nouveau numéro alors qu’il existe ${legacy.length > 1 ? 'd’anciennes fiches' : 'une ancienne fiche'} « ${p.first_name} » sans numéro. S’il s’agit de la même personne, fusionne pour récupérer son historique et son abonnement.`),
+      ...legacy.map((x) => h('button.btn.btn-ghost.btn-block', { type: 'button', onclick: async () => {
+        const ok = await confirmSheet({ title: 'Même personne ?', message: `L’ancienne fiche « ${x.first_name} » (sans numéro) sera fusionnée dans celle-ci, qui garde le numéro ${p.phone_display}. Historique, participations et abonnement sont regroupés.`, confirmLabel: 'Fusionner', danger: false });
+        if (!ok) return;
+        try { await api('POST', `/api/admin/players/${x.id}/merge`, { into_player_id: p.id, phone_from: 'target' }); toast('Fiches fusionnées ✅'); rerender(); }
+        catch (e) { toast(e.message, 'error'); }
+      } }, `Fusionner avec l’ancienne fiche « ${x.first_name} »`)),
+      h('button.btn-link', { type: 'button', onclick: () => patch({ needs_review: false }, 'Marquée comme vérifiée') }, 'Ce n’est pas la même personne'),
+    ]) : null;
 
     // Fusion
     const mergeCard = h('section.card.stack', [
       h('h2.section-title', 'Doublon ?'),
       h('p.hint', 'Si cette fiche a été créée par erreur pour une personne qui en a déjà une, fusionne-la : historique, présences et statut sont regroupés.'),
-      d.homonyms.length ? alertBox('info', '👥', `Autre(s) fiche(s) avec le même prénom : ${d.homonyms.map((x) => x.first_name).join(', ')}`) : null,
+      d.homonyms.length ? alertBox('info', '👥', `Autre(s) fiche(s) avec le même prénom : ${d.homonyms.map((x) => `${x.first_name} (${x.missing_phone ? 'sans numéro' : x.phone_display})`).join(', ')}`) : null,
       h('button.btn.btn-ghost.btn-block', { type: 'button', onclick: () => mergeSheet(p, d.homonyms) }, 'Fusionner avec une autre fiche…'),
       d.history.length === 0 ? h('button.btn.btn-danger.btn-block', { type: 'button', onclick: async () => {
         if (!(await confirmSheet({ title: 'Supprimer la fiche ?', message: `${p.first_name} n’a aucun match : sa fiche sera supprimée.`, confirmLabel: 'Supprimer' }))) return;
@@ -892,9 +941,10 @@
       h('header.page-head', [
         h('a.back-link', { href: '#/players' }, [icon('back'), 'Joueurs']),
         h('h1', p.first_name),
-        h('div.sub', [statusBadge(p.subscription), h(`span.pi-prio${p.priority ? '.on' : ''}`, p.priority ? 'Prioritaire' : 'Non prioritaire'), h('span.num', `Tarif actuel : ${euros(p.price_cents)}`)]),
+        h('div.sub', [phoneBadge(p), statusBadge(p.subscription), h(`span.pi-prio${p.priority ? '.on' : ''}`, p.priority ? 'Prioritaire' : 'Non prioritaire'), h('span.num', `Tarif actuel : ${euros(p.price_cents)}`)]),
       ]),
-      h('div.split', [h('div.stack', [subCard, partCard]), h('div.stack', [idCard, mergeCard])]),
+      reviewCard,
+      h('div.split', [h('div.stack', [idCard, subCard, partCard]), h('div.stack', [mergeCard])]),
       histCard,
     ]);
   }
@@ -903,30 +953,39 @@
     openSheet((close) => {
       let players = [];
       let target = null;
-      const search = h('input.input', { placeholder: 'Rechercher la bonne fiche', autocomplete: 'off' });
+      let phoneFrom = 'target';
+      const search = h('input.input', { placeholder: 'Rechercher la bonne fiche (prénom ou numéro)', autocomplete: 'off' });
       const list = h('div.pick-list');
+      const phoneChoice = h('div');
       const err = h('div');
       const btn = h('button.btn.btn-primary.btn-block', { type: 'button', disabled: true }, 'Fusionner');
+      const drawPhone = () => {
+        if (!target || p.missing_phone || target.missing_phone || p.phone === target.phone) { phoneChoice.replaceChildren(); return; }
+        phoneChoice.replaceChildren(h('div.field', [
+          h('span.label', 'Numéro à conserver'),
+          segmented([['target', target.phone_display], ['source', p.phone_display]], phoneFrom, (v) => { phoneFrom = v; }),
+        ]));
+      };
       const draw = () => {
-        const q = search.value.trim().toLowerCase();
-        const shown = players.filter((x) => x.id !== p.id && (!q || x.first_name.toLowerCase().includes(q)))
+        const q = search.value.trim();
+        const shown = players.filter((x) => x.id !== p.id && matchesQuery(x, q))
           .sort((a, b) => (homonyms.some((hm) => hm.id === b.id) ? 1 : 0) - (homonyms.some((hm) => hm.id === a.id) ? 1 : 0)).slice(0, 8);
-        list.replaceChildren(...shown.map((x) => h('button.pick', { type: 'button', 'aria-pressed': String(target && target.id === x.id), onclick: () => { target = x; btn.disabled = false; draw(); } },
-          [h('span.pick-name', x.first_name), h('span.pick-meta', `${x.label} · ${F.plural(x.registrations_total, 'match', 'matchs')}`)])));
+        list.replaceChildren(...shown.map((x) => h('button.pick', { type: 'button', 'aria-pressed': String(target && target.id === x.id), onclick: () => { target = x; phoneFrom = 'target'; btn.disabled = false; draw(); drawPhone(); } },
+          [h('span.pick-name', [x.first_name, h('small.pick-phone', x.missing_phone ? ' · sans numéro' : ` · ${x.phone_display}`)]), h('span.pick-meta', `${x.label} · ${F.plural(x.registrations_total, 'match', 'matchs')}`)])));
       };
       search.addEventListener('input', draw);
       api('GET', '/api/admin/players').then((r) => { players = r.players; draw(); });
       btn.addEventListener('click', async () => {
         if (!target) return;
         try {
-          const r = await api('POST', `/api/admin/players/${p.id}/merge`, { into_player_id: target.id });
+          const r = await api('POST', `/api/admin/players/${p.id}/merge`, { into_player_id: target.id, phone_from: phoneFrom });
           close(); toast('Fiches fusionnées ✅'); location.hash = `#/player/${r.player.id}`;
         } catch (e) { err.replaceChildren(errorBox(e.message)); }
       });
       return [
         h('h2.sheet-title', 'Fusionner'),
-        h('p', { style: 'color:var(--text-2)' }, `La fiche « ${p.first_name} » sera fusionnée dans la fiche choisie, puis supprimée. Le meilleur statut est conservé.`),
-        search, list, err, btn,
+        h('p', { style: 'color:var(--text-2)' }, `La fiche « ${p.first_name} » sera fusionnée dans la fiche choisie, puis supprimée. Historique, présences et tarifs sont conservés, le meilleur statut est gardé.`),
+        search, list, phoneChoice, err, btn,
       ];
     });
   }

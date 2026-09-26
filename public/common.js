@@ -110,7 +110,7 @@
     }
     let data = {};
     try { data = await res.json(); } catch { /* vide */ }
-    if (!res.ok) throw { status: res.status, error: data.error || 'error', message: data.message || 'Une erreur est survenue.' };
+    if (!res.ok) throw { ...data, status: res.status, error: data.error || 'error', message: data.message || 'Une erreur est survenue.' };
     return data;
   }
 

@@ -306,7 +306,6 @@ dialog.sheet[open] { animation: sheet-in 0.22s ease-out; }
 .progress-dots { display: inline-flex; gap: 5px; }
 .progress-dots .dot { width: 18px; height: 6px; border-radius: 99px; background: var(--surface-3); }
 .progress-dots .dot.on { background: var(--accent); }
-.code-pill { font-family: var(--display); font-size: 26px; font-weight: 800; letter-spacing: 0.12em; padding: 4px 12px; border-radius: 12px; background: var(--bg-2); border: 1px dashed var(--line); }
 
 /* Fiche joueur : historique */
 .mini-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
@@ -342,3 +341,11 @@ dialog.sheet[open] { animation: sheet-in 0.22s ease-out; }
 .pick-name { font-weight: 700; }
 .pick-meta { font-size: 13px; color: var(--muted); }
 .pick-new { border-style: dashed; color: var(--accent); }
+
+/* ================= v3 : identification par téléphone ================= */
+.phone { font-weight: 600; color: var(--text-2); letter-spacing: 0.02em; }
+.badge.no-phone { background: var(--warn-soft); color: var(--warn); }
+.badge.review { background: var(--warn-soft); color: var(--warn); font-size: 11px; margin-left: 8px; vertical-align: middle; }
+.review-card { border-color: var(--warn-line); }
+.pick-phone { font-weight: 500; color: var(--muted); font-size: 13px; }
+.page-head .sub .phone { font-size: 15px; }

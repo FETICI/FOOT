@@ -1,8 +1,9 @@
 'use strict';
 const crypto = require('node:crypto');
 const {
-  normalizeName, getSetting, createPlayer, ensureMatchLinks, currentSeasonId, newPlayerCode, seasonFor,
+  normalizeName, getSetting, createPlayer, ensureMatchLinks, currentSeasonId, seasonFor,
 } = require('./db');
+const { normalizePhone, formatPhone } = require('./phone');
 const { today, addDays, nextFriday, isValidDate, isValidTime } = require('./dates');
 const {
   standing, priceFor, linkActive, phaseRequiresPriority, SUBSCRIPTIONS, SUBSCRIPTION_LABEL, TIER_LABEL, LINK_LEVELS, LOYALTY_THRESHOLD,
@@ -37,7 +38,45 @@ function defaultStatusFor(method) {
   return method === 'cash' ? 'cash_due' : 'to_pay';
 }
 
-const hashDevice = (token) => crypto.createHash('sha256').update(String(token)).digest('hex');
+/** Distance d'édition (petites fautes de frappe sur un prénom). */
+function levenshtein(a, b) {
+  const dp = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = dp[j];
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return dp[b.length];
+}
+
+/**
+ * Le prénom saisi correspond-il au prénom enregistré pour ce numéro ?
+ * Tolère majuscules, accents, espaces, initiale ajoutée (« Thomas B. ») et une faute de frappe.
+ */
+function namesMatch(typed, stored) {
+  const a = normalizeName(typed);
+  const b = normalizeName(stored);
+  if (!a || !b) return false;
+  if (a === b || a.replace(/ /g, '') === b.replace(/ /g, '')) return true;
+  const fa = a.split(' ')[0];
+  const fb = b.split(' ')[0];
+  if (fa === fb) return true;
+  return Math.min(fa.length, fb.length) >= 4 && levenshtein(fa, fb) <= 1;
+}
+
+/** Normalise un numéro saisi ; erreur explicite sinon. */
+function requirePhone(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    throw new AppError(400, 'phone_required', 'Indique ton numéro de téléphone.');
+  }
+  const n = normalizePhone(raw);
+  if (!n) throw new AppError(400, 'phone_invalid', 'Numéro de téléphone invalide. Exemple : 06 12 34 56 78');
+  return n;
+}
 
 /* Messages destinés aux joueurs (jamais de détail technique) */
 const MSG = {
@@ -46,10 +85,8 @@ const MSG = {
   closed: 'Les inscriptions sont fermées.',
   finished: 'Ce match est terminé.',
   priority_only: 'Les inscriptions sont actuellement réservées aux joueurs prioritaires. Tu pourras revenir lorsque les inscriptions seront ouvertes à tous.',
-  subscriber_not_recognized: 'Ton statut abonné n’a pas été reconnu. Tu peux t’inscrire au tarif normal ou contacter l’organisateur.',
-  code_required: 'Entre ton code joueur pour être reconnu comme abonné.',
-  name_taken: 'Un joueur portant ce prénom est déjà enregistré. Si c’est toi, entre ton code joueur. Sinon, ajoute l’initiale de ton nom (ex. Thomas B.).',
-  already_registered: 'Tu es déjà inscrit à ce match ✅',
+  phone_name_mismatch: 'Ce numéro est déjà associé à un joueur. Vérifie ton prénom ou contacte l’organisateur.',
+  already_registered: 'Tu es déjà inscrit à ce foot ✅',
   full: 'Toutes les places sont prises.',
 };
 
@@ -58,7 +95,7 @@ function createRepo(db) {
     matchById: db.prepare('SELECT * FROM matches WHERE id = ?'),
     regById: db.prepare('SELECT * FROM registrations WHERE id = ?'),
     regsByMatch: db.prepare(`
-      SELECT r.*, p.first_name AS player_name, p.code AS player_code
+      SELECT r.*, p.first_name AS player_name
       FROM registrations r LEFT JOIN players p ON p.id = r.player_id
       WHERE r.match_id = ? ORDER BY r.created_at, r.id`),
     countByMatch: db.prepare('SELECT COUNT(*) AS n FROM registrations WHERE match_id = ?'),
@@ -84,7 +121,8 @@ function createRepo(db) {
       SELECT COUNT(*) AS n FROM registrations r JOIN matches m ON m.id = r.match_id
       WHERE r.player_id = ? AND m.season_id = ? AND r.attendance = 'present'`),
     seasonById: db.prepare('SELECT * FROM seasons WHERE id = ?'),
-    deviceByHash: db.prepare('SELECT player_id FROM player_devices WHERE token_hash = ?'),
+    playerByPhone: db.prepare('SELECT * FROM players WHERE phone_normalized = ?'),
+    legacyHomonyms: db.prepare('SELECT id, first_name FROM players WHERE name_key = ? AND phone_normalized IS NULL AND id <> ?'),
   };
 
   const seasonId = () => currentSeasonId(db);
@@ -199,28 +237,18 @@ function createRepo(db) {
     };
   }
 
-  /** Ce que le téléphone reconnu peut savoir de SON joueur. */
-  function meView(playerId, match) {
-    const p = playerId && q.playerById.get(playerId);
-    if (!p) return null;
-    const sid = match ? match.season_id : seasonId();
-    const st = standingOf(p.id, sid);
-    const reg = match ? q.regByPlayerMatch.get(match.id, p.id) : null;
-    const price = match ? priceFor(st, match) : null;
+  /** Inscription d'UN joueur à un match, telle qu'il peut la voir (après s'être identifié). */
+  function ownRegistration(player, match) {
+    const reg = q.regByPlayerMatch.get(match.id, player.id);
+    if (!reg) return null;
     return {
-      first_name: p.first_name,
-      code: p.code,
-      status_label: st.label,
-      subscriber: st.subscriber,
-      priority: st.priority,
-      loyalty_eligible: st.loyalty_eligible,
-      price_cents: price ? price.price_cents : null,
-      registration: reg ? {
-        payment_method: reg.payment_method,
-        price_cents: reg.price_cents,
-        tier: reg.tier,
-        payment_link: reg.payment_method === 'card' ? paymentLinkFor(reg.price_cents) : '',
-      } : null,
+      first_name: player.first_name,
+      payment_method: reg.payment_method,
+      price_cents: reg.price_cents,
+      tier: reg.tier,
+      subscriber: reg.tier !== 'standard',
+      loyalty_upgrade: reg.tier === 'loyalty_upgrade',
+      payment_link: reg.payment_method === 'card' ? paymentLinkFor(reg.price_cents) : '',
     };
   }
 
@@ -339,20 +367,19 @@ function createRepo(db) {
     },
 
     /** Lien général : informations seulement (aucune inscription possible par ce biais). */
-    currentPublicMatch(devicePlayerId) {
+    currentPublicMatch() {
       const m = q.upcomingPublic.get(today());
-      if (!m) return { current: null, me: null };
-      return { current: publicMatchView(m), me: meView(devicePlayerId, m) };
+      return { current: m ? publicMatchView(m) : null };
     },
 
-    publicMatch(id, devicePlayerId) {
+    publicMatch(id) {
       const m = q.matchById.get(Number(id));
       if (!m || m.status === 'draft') throw new AppError(404, 'not_found', 'Match introuvable.');
-      return { current: publicMatchView(m), me: meView(devicePlayerId, m) };
+      return { current: publicMatchView(m) };
     },
 
     /** Ouverture d'un lien d'inscription. Ne révèle jamais le niveau du lien ni les autres liens. */
-    publicLink(token, devicePlayerId) {
+    publicLink(token) {
       const link = typeof token === 'string' && token.length >= 20 && token.length <= 100 ? q.linkByToken.get(token) : null;
       const match = link ? q.matchById.get(link.match_id) : null;
       const state = linkState(match, link);
@@ -363,91 +390,75 @@ function createRepo(db) {
         message: state === 'open' ? null : MSG[state],
         priority_only: state === 'open' && phaseRequiresPriority(match.status),
         current: view,
-        me: meView(devicePlayerId, match),
       };
     },
 
     /**
-     * Inscription publique. Toutes les règles sont vérifiées ici :
-     * lien + phase, identité, statut réel (jamais la déclaration), priorité, doublon, capacité, tarif.
+     * Inscription publique. Toutes les règles sont vérifiées ici, dans cet ordre :
+     * lien + phase → identification par numéro normalisé (+ contrôle du prénom) → doublon
+     * → priorité → capacité → tarif calculé depuis la fiche → lien bancaire du montant.
+     * Toute autre valeur envoyée par le navigateur (tarif, statut, lien…) est ignorée.
      */
-    registerPublic(matchId, input, { devicePlayerId = null } = {}) {
+    registerPublic(matchId, input) {
       const match = q.matchById.get(Number(matchId));
       const link = typeof input.link_token === 'string' && input.link_token.length <= 100 ? q.linkByToken.get(input.link_token) : null;
       const state = linkState(match, link);
       if (state === 'invalid') throw new AppError(404, 'invalid_link', MSG.invalid_link);
       if (state !== 'open') throw new AppError(403, state, MSG[state]);
 
+      const name = cleanFirstName(input.first_name);
+      const phone = requirePhone(input.phone);
       const method = input.payment_method;
       if (!METHODS.includes(method)) throw new AppError(400, 'method_required', 'Choisis ton mode de paiement.');
-      const claims = input.claims_subscriber === true;
-      const code = String(input.player_code ?? '').trim();
-      if (code && !/^\d{4}$/.test(code)) throw new AppError(400, 'bad_code_format', 'Le code joueur contient 4 chiffres.');
 
-      // 1. Identification du joueur
-      let player = null;
-      let newName = null;
-      const useDevice = devicePlayerId && input.as_other !== true && q.playerById.get(devicePlayerId);
-      if (useDevice) {
-        player = q.playerById.get(devicePlayerId);
-      } else {
-        const name = cleanFirstName(input.first_name);
-        const candidates = q.playersByKey.all(normalizeName(name));
-        if (code) {
-          player = candidates.find((p) => crypto.timingSafeEqual(Buffer.from(p.code), Buffer.from(code))) || null;
-          if (!player) {
-            throw new AppError(403, claims ? 'subscriber_not_recognized' : 'bad_code',
-              claims ? MSG.subscriber_not_recognized : 'Code joueur incorrect. Vérifie-le ou contacte l’organisateur.', { code_failed: true });
-          }
-        } else if (candidates.length === 0) {
-          if (claims) throw new AppError(403, 'subscriber_not_recognized', MSG.subscriber_not_recognized);
-          newName = name;
-        } else if (claims) {
-          throw new AppError(409, 'code_required', MSG.code_required);
-        } else {
-          throw new AppError(409, 'name_taken', MSG.name_taken);
-        }
-      }
-
-      // 2. Statut réel (fiche joueur) — la déclaration « je suis abonné » ne donne jamais le tarif abonné
-      const st = player ? standingOf(player.id, match.season_id) : standing('none', 0);
-      if (claims && !st.subscriber && !st.loyalty_eligible) {
-        throw new AppError(403, 'subscriber_not_recognized', MSG.subscriber_not_recognized);
-      }
-
-      // 3. Priorité : en phase Prioritaires, le lien ne suffit pas
-      if (phaseRequiresPriority(match.status) && !st.priority) {
-        throw new AppError(403, 'priority_only', MSG.priority_only);
-      }
-
-      // 4. Doublon + capacité + écriture (atomique)
       return tx(() => {
-        if (player) {
-          const existing = q.regByPlayerMatch.get(match.id, player.id);
-          if (existing) throw new AppError(409, 'already_registered', MSG.already_registered, { player_id: player.id });
+        // 1. Identification : 1 numéro normalisé = 1 fiche
+        const player = q.playerByPhone.get(phone);
+        if (player && !namesMatch(name, player.first_name)) {
+          throw new AppError(409, 'phone_name_mismatch', MSG.phone_name_mismatch); // sans révéler le prénom enregistré
         }
+        // 2. Déjà inscrit : on renvoie SA propre inscription (il vient de prouver prénom + numéro)
+        if (player && q.regByPlayerMatch.get(match.id, player.id)) {
+          throw new AppError(409, 'already_registered', MSG.already_registered, { registration: ownRegistration(player, match) });
+        }
+        // 3. Priorité : en phase Prioritaires, le lien ne suffit pas
+        const st = player ? standingOf(player.id, match.season_id) : standing('none', 0);
+        if (phaseRequiresPriority(match.status) && !st.priority) {
+          throw new AppError(403, 'priority_only', MSG.priority_only);
+        }
+        // 4. Capacité
         if (q.countByMatch.get(match.id).n >= match.capacity) throw new AppError(409, 'full', MSG.full);
-        const playerId = player ? player.id : createPlayer(db, { first_name: newName, season_id: match.season_id });
+        // 5. Fiche : numéro inconnu → nouvelle fiche (jamais rattachée à une ancienne fiche sur le seul prénom)
+        let playerId = player ? player.id : null;
+        if (!playerId) {
+          const legacy = q.legacyHomonyms.all(normalizeName(name), -1);
+          playerId = createPlayer(db, { first_name: name, season_id: match.season_id, phone, needs_review: legacy.length > 0 });
+        }
+        // 6. Tarif (serveur) et lien bancaire correspondant au montant
         const pricing = priceFor(st, match);
-        const reg = insertRegistration(match, playerId, { method, status: defaultStatusFor(method), pricing, source: 'player' });
+        insertRegistration(match, playerId, { method, status: defaultStatusFor(method), pricing, source: 'player' });
         const p = q.playerById.get(playerId);
         return {
-          player_id: playerId,
           created_player: !player,
-          registration: {
-            id: reg.id,
-            first_name: p.first_name,
-            payment_method: reg.payment_method,
-            price_cents: reg.price_cents,
-            tier: reg.tier,
-            loyalty_upgrade: pricing.upgrade,
-            subscriber: pricing.tier !== 'standard',
-            player_code: p.code,
-          },
-          payment_link: method === 'card' ? paymentLinkFor(reg.price_cents) : '',
+          registration: ownRegistration(p, match),
+          payment_link: method === 'card' ? paymentLinkFor(pricing.price_cents) : '',
           current: publicMatchView(match),
         };
       });
+    },
+
+    /**
+     * Permet à un joueur de retrouver SA confirmation (prénom + numéro), par ex. en rouvrant le lien.
+     * Ne révèle rien si le couple prénom/numéro ne correspond pas.
+     */
+    lookupPublic(matchId, input) {
+      const match = q.matchById.get(Number(matchId));
+      const link = typeof input.link_token === 'string' && input.link_token.length <= 100 ? q.linkByToken.get(input.link_token) : null;
+      if (linkState(match, link) === 'invalid') throw new AppError(404, 'invalid_link', MSG.invalid_link);
+      const phone = normalizePhone(input.phone);
+      const player = phone ? q.playerByPhone.get(phone) : null;
+      if (!player || !namesMatch(String(input.first_name ?? ''), player.first_name)) return { registration: null };
+      return { registration: ownRegistration(player, match) };
     },
 
     /** Ajout par l'organisateur : ignore phase et priorité, jamais la capacité. */
@@ -460,37 +471,27 @@ function createRepo(db) {
         if (!PAY_STATUSES.includes(input.payment_status)) throw new AppError(400, 'invalid_payment_status', 'Statut de paiement invalide.');
         status = input.payment_status === 'paid' ? 'paid' : defaultStatusFor(method);
       }
-      const existingPlayer = input.player_id ? requirePlayer(input.player_id) : null;
+      let existingPlayer = input.player_id ? requirePlayer(input.player_id) : null;
       const newName = existingPlayer ? null : cleanFirstName(input.first_name);
+      const phone = !existingPlayer && input.phone ? requirePhone(input.phone) : null;
+      if (phone) {
+        const owner = q.playerByPhone.get(phone);
+        if (owner && !namesMatch(newName, owner.first_name)) {
+          throw new AppError(409, 'phone_taken', `Ce numéro appartient déjà à la fiche « ${owner.first_name} ». Choisis cette fiche dans la liste.`);
+        }
+        if (owner) existingPlayer = owner;
+      }
       return tx(() => {
         if (existingPlayer && q.regByPlayerMatch.get(match.id, existingPlayer.id)) {
           throw new AppError(409, 'already_registered', `${existingPlayer.first_name} est déjà inscrit à ce match.`);
         }
         if (q.countByMatch.get(match.id).n >= match.capacity) throw new AppError(409, 'full', MSG.full);
         // Un nouveau prénom crée toujours une nouvelle fiche (homonymes autorisés pour l'organisateur)
-        const playerId = existingPlayer ? existingPlayer.id : createPlayer(db, { first_name: newName, season_id: match.season_id });
+        const playerId = existingPlayer ? existingPlayer.id : createPlayer(db, { first_name: newName, season_id: match.season_id, phone });
         const pricing = priceFor(standingOf(playerId, match.season_id), match);
         insertRegistration(match, playerId, { method, status, pricing, source: 'admin' });
         return adminMatchView(match);
       });
-    },
-
-    /* ---------- Téléphones reconnus ---------- */
-
-    playerFromDevice(token) {
-      if (!token || typeof token !== 'string' || token.length > 100) return null;
-      const row = q.deviceByHash.get(hashDevice(token));
-      return row ? row.player_id : null;
-    },
-
-    issueDevice(playerId) {
-      const token = crypto.randomBytes(32).toString('base64url');
-      db.prepare('INSERT INTO player_devices (token_hash, player_id, last_seen_at) VALUES (?, ?, ?)').run(hashDevice(token), playerId, new Date().toISOString());
-      return token;
-    },
-
-    forgetDevice(token) {
-      if (token) db.prepare('DELETE FROM player_devices WHERE token_hash = ?').run(hashDevice(token));
     },
 
     /* ---------- Matchs (admin) ---------- */
@@ -618,7 +619,10 @@ function createRepo(db) {
         return {
           id: r.id,
           first_name: r.first_name,
-          code: r.code,
+          phone: r.phone_normalized,
+          phone_display: formatPhone(r.phone_normalized),
+          missing_phone: !r.phone_normalized,
+          needs_review: !!r.needs_review,
           is_demo: !!r.is_demo,
           ...st,
           price_cents: price.price_cents,
@@ -633,7 +637,14 @@ function createRepo(db) {
       const name = cleanFirstName(input.first_name);
       const sub = input.subscription ?? 'none';
       if (!SUBSCRIPTIONS.includes(sub)) throw new AppError(400, 'invalid_subscription', 'Statut invalide.');
-      const id = createPlayer(db, { first_name: name, season_id: seasonId(), subscription: sub });
+      const phone = input.phone ? requirePhone(input.phone) : null;
+      const id = tx(() => {
+        if (phone) {
+          const owner = q.playerByPhone.get(phone);
+          if (owner) throw new AppError(409, 'phone_taken', `Ce numéro est déjà utilisé par la fiche « ${owner.first_name} ».`, { other_player_id: owner.id });
+        }
+        return createPlayer(db, { first_name: name, season_id: seasonId(), subscription: sub, phone });
+      });
       return this.playerDetail(id);
     },
 
@@ -655,20 +666,23 @@ function createRepo(db) {
         label: SUBSCRIPTION_LABEL[s.subscription],
         participations: participations(p.id, s.id),
       }));
-      const homonyms = q.playersByKey.all(p.name_key).filter((o) => o.id !== p.id).map((o) => ({ id: o.id, first_name: o.first_name }));
+      const homonyms = q.playersByKey.all(p.name_key).filter((o) => o.id !== p.id)
+        .map((o) => ({ id: o.id, first_name: o.first_name, phone_display: formatPhone(o.phone_normalized), missing_phone: !o.phone_normalized }));
       const next = this.nextDefaults();
       return {
         player: {
           id: p.id,
           first_name: p.first_name,
-          code: p.code,
+          phone: p.phone_normalized,
+          phone_display: formatPhone(p.phone_normalized),
+          missing_phone: !p.phone_normalized,
+          needs_review: !!p.needs_review,
           created_at: p.created_at,
           is_demo: !!p.is_demo,
           ...st,
           price_cents: priceFor(st, next).price_cents,
           present_season: q.presentCount.get(p.id, sid).n,
           adjustment: q.playerSeason.get(p.id, sid).participations_adjustment,
-          devices: db.prepare('SELECT COUNT(*) AS n FROM player_devices WHERE player_id = ?').get(p.id).n,
         },
         stats: {
           matches: history.length,
@@ -693,9 +707,23 @@ function createRepo(db) {
         if (input.first_name !== undefined) {
           const name = cleanFirstName(input.first_name);
           const key = normalizeName(name);
-          let code = p.code;
-          if (key !== p.name_key && q.playersByKey.all(key).some((o) => o.code === p.code)) code = newPlayerCode(db, key);
-          db.prepare('UPDATE players SET first_name = ?, name_key = ?, code = ? WHERE id = ?').run(name, key, code, p.id);
+          db.prepare('UPDATE players SET first_name = ?, name_key = ? WHERE id = ?').run(name, key, p.id);
+        }
+        if (input.phone !== undefined) {
+          // Numéro normalisé puis contrôle d'unicité : on n'écrase jamais une autre fiche
+          const phone = String(input.phone).trim() === '' ? null : requirePhone(input.phone);
+          if (phone) {
+            const owner = q.playerByPhone.get(phone);
+            if (owner && owner.id !== p.id) {
+              throw new AppError(409, 'phone_taken',
+                `Ce numéro est déjà utilisé par la fiche « ${owner.first_name} ». S’il s’agit de la même personne, utilise « Fusionner ».`,
+                { other_player_id: owner.id });
+            }
+          }
+          db.prepare('UPDATE players SET phone_normalized = ? WHERE id = ?').run(phone, p.id);
+        }
+        if (input.needs_review === false) {
+          db.prepare('UPDATE players SET needs_review = 0 WHERE id = ?').run(p.id);
         }
         if (input.subscription !== undefined) {
           if (!SUBSCRIPTIONS.includes(input.subscription)) throw new AppError(400, 'invalid_subscription', 'Statut invalide.');
@@ -708,18 +736,16 @@ function createRepo(db) {
           const present = q.presentCount.get(p.id, sid).n;
           db.prepare('UPDATE player_seasons SET participations_adjustment = ? WHERE player_id = ? AND season_id = ?').run(target - present, p.id, sid);
         }
-        if (input.regenerate_code === true) {
-          db.prepare('UPDATE players SET code = ? WHERE id = ?').run(newPlayerCode(db, q.playerById.get(p.id).name_key), p.id);
-        }
-        if (input.forget_devices === true) {
-          db.prepare('DELETE FROM player_devices WHERE player_id = ?').run(p.id);
-        }
       });
       return this.playerDetail(p.id);
     },
 
-    /** Fusionne la fiche `sourceId` dans `targetId` (doublon d'une même personne). */
-    mergePlayers(sourceId, targetId) {
+    /**
+     * Fusionne la fiche `sourceId` dans `targetId` (doublon d'une même personne).
+     * `phoneFrom` : fiche dont on garde le numéro ('target' par défaut, ou 'source').
+     * Si la fiche conservée n'a pas de numéro, celui de l'autre fiche est repris.
+     */
+    mergePlayers(sourceId, targetId, { phoneFrom = 'target' } = {}) {
       const src = requirePlayer(sourceId);
       const dst = requirePlayer(targetId);
       if (src.id === dst.id) throw new AppError(400, 'same_player', 'Choisis deux fiches différentes.');
@@ -732,8 +758,8 @@ function createRepo(db) {
       }
       const rank = { none: 0, loyalty: 1, annual: 2 };
       tx(() => {
+        const keepPhone = phoneFrom === 'source' ? (src.phone_normalized || dst.phone_normalized) : (dst.phone_normalized || src.phone_normalized);
         db.prepare('UPDATE registrations SET player_id = ? WHERE player_id = ?').run(dst.id, src.id);
-        db.prepare('UPDATE player_devices SET player_id = ? WHERE player_id = ?').run(dst.id, src.id);
         for (const s of db.prepare('SELECT * FROM player_seasons WHERE player_id = ?').all(src.id)) {
           const d = q.playerSeason.get(dst.id, s.season_id);
           if (!d) {
@@ -744,7 +770,8 @@ function createRepo(db) {
               .run(best.subscription, best.subscribed_at, d.participations_adjustment + s.participations_adjustment, dst.id, s.season_id);
           }
         }
-        db.prepare('DELETE FROM players WHERE id = ?').run(src.id);
+        db.prepare('DELETE FROM players WHERE id = ?').run(src.id);           // libère le numéro (index unique)
+        db.prepare('UPDATE players SET phone_normalized = ?, needs_review = 0 WHERE id = ?').run(keepPhone, dst.id);
       });
       return this.playerDetail(dst.id);
     },
@@ -809,4 +836,4 @@ function createRepo(db) {
   };
 }
 
-module.exports = { createRepo, AppError, cleanFirstName, PAYMENT_LINK_AMOUNTS };
+module.exports = { createRepo, AppError, cleanFirstName, PAYMENT_LINK_AMOUNTS, namesMatch };

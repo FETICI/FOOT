@@ -14,25 +14,6 @@ fieldset.plain { border: 0; margin: 0; padding: 0; min-width: 0; }
 fieldset.plain > legend { padding: 0; margin-bottom: 8px; }
 .chip-sub { color: var(--muted); font-weight: 600; }
 
-.sub-choice .pay-option label { min-height: 58px; padding: 10px; }
-.sub-choice .pay-option .t { font-size: 15px; }
-
-.identity {
-  display: grid; gap: 10px;
-  padding: 16px; border-radius: var(--r);
-  background: var(--accent-soft); border: 1px solid var(--accent-line);
-}
-.identity-hello { font-size: 20px; font-weight: 800; }
-.identity-line { margin-top: 4px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.identity-actions { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-left: -8px; }
-.identity-actions .btn-link { font-size: 14px; padding: 4px 8px; }
-.tag-prio {
-  display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px;
-  background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
-}
-
-.code-input { letter-spacing: 0.5em; font-size: 24px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
-
 .amount { display: grid; justify-items: center; gap: 2px; text-align: center; padding: 18px; }
 .amount-label { color: var(--muted); font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
 .amount-value { font-family: var(--display); font-weight: 800; font-size: 52px; line-height: 1; }
@@ -41,8 +22,6 @@ fieldset.plain > legend { padding: 0; margin-bottom: 8px; }
 .congrats { text-align: center; background: linear-gradient(180deg, rgba(39,212,107,0.18), rgba(39,212,107,0.06)); border-color: var(--accent-line); display: grid; gap: 4px; }
 .congrats-title { font-family: var(--display); font-size: 30px; font-weight: 800; text-transform: uppercase; }
 
-.code-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.code-value {
-  font-family: var(--display); font-size: 34px; font-weight: 800; letter-spacing: 0.12em;
-  padding: 6px 14px; border-radius: 14px; background: var(--bg-2); border: 1px dashed var(--line);
-}
+.input.invalid { border-color: var(--danger); box-shadow: 0 0 0 4px var(--danger-soft); }
+.hint.center { text-align: center; }
+.center-link { justify-self: center; font-size: 14px; color: var(--muted); }

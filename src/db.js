@@ -30,8 +30,15 @@ function seasonFor(isoDate) {
   return { name: `${start}–${start + 1}`, start_date: `${start}-09-01` };
 }
 
-/** Code joueur à 4 chiffres, unique parmi les joueurs portant le même prénom. */
-function newPlayerCode(db, nameKey) {
+function hasColumn(db, table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+}
+
+/**
+ * ANCIEN SYSTÈME (supprimé en v5) — utilisé uniquement par les migrations historiques v2/v3,
+ * tant que la colonne `players.code` existe encore. L'application ne l'utilise plus.
+ */
+function legacyPlayerCode(db, nameKey) {
   const taken = new Set(db.prepare('SELECT code FROM players WHERE name_key = ?').all(nameKey).map((r) => r.code));
   for (let i = 0; i < 200; i++) {
     const code = String(crypto.randomInt(0, 10000)).padStart(4, '0');
@@ -40,14 +47,21 @@ function newPlayerCode(db, nameKey) {
   throw new Error('Impossible de générer un code joueur');
 }
 
-function createPlayer(db, { first_name, season_id, subscription = 'none', adjustment = 0, is_demo = 0, created_at = null }) {
+/**
+ * Crée une fiche joueur. `phone` doit être déjà normalisé (+33…) ou null.
+ * L'unicité du numéro est garantie par l'index UNIQUE idx_players_phone.
+ */
+function createPlayer(db, { first_name, season_id, subscription = 'none', adjustment = 0, is_demo = 0, created_at = null, phone = null, needs_review = 0 }) {
   const key = normalizeName(first_name);
-  const code = newPlayerCode(db, key);
-  const r = created_at
-    ? db.prepare('INSERT INTO players (first_name, name_key, code, is_demo, created_season_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(first_name, key, code, is_demo, season_id, created_at)
-    : db.prepare('INSERT INTO players (first_name, name_key, code, is_demo, created_season_id) VALUES (?, ?, ?, ?, ?)')
-        .run(first_name, key, code, is_demo, season_id);
+  const cols = ['first_name', 'name_key', 'is_demo', 'created_season_id'];
+  const vals = [first_name, key, is_demo, season_id];
+  if (created_at) { cols.push('created_at'); vals.push(created_at); }
+  if (hasColumn(db, 'players', 'code')) { cols.push('code'); vals.push(legacyPlayerCode(db, key)); } // migrations historiques uniquement
+  if (hasColumn(db, 'players', 'phone_normalized')) {
+    cols.push('phone_normalized', 'needs_review');
+    vals.push(phone, needs_review ? 1 : 0);
+  }
+  const r = db.prepare(`INSERT INTO players (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...vals);
   const id = Number(r.lastInsertRowid);
   db.prepare(`INSERT INTO player_seasons (player_id, season_id, subscription, subscribed_at, participations_adjustment)
               VALUES (?, ?, ?, ?, ?)`)
@@ -211,19 +225,39 @@ const MIGRATIONS = [
       db.prepare("INSERT INTO settings (key, value) VALUES ('demo_reseed', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
     }
   },
+
+  // v5 — identification par numéro de téléphone : fin du code joueur et de la reconnaissance par cookie.
+  //      Aucune fiche n'est fusionnée ni supprimée ; aucune donnée d'inscription n'est modifiée.
+  (db) => {
+    db.exec(`
+      ALTER TABLE players ADD COLUMN phone_normalized TEXT;           -- +33612345678 ; NULL = numéro à renseigner
+      CREATE UNIQUE INDEX idx_players_phone ON players(phone_normalized);
+      ALTER TABLE players ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0; -- fiche à vérifier (doublon possible d'une ancienne fiche)
+      ALTER TABLE players DROP COLUMN code;
+      DROP TABLE IF EXISTS player_devices;
+    `);
+    // Seules les fiches de démonstration reçoivent un numéro (fictif, plage réservée) ; les vraies fiches restent « numéro à renseigner ».
+    const setPhone = db.prepare('UPDATE players SET phone_normalized = ? WHERE id = ? AND phone_normalized IS NULL');
+    const taken = db.prepare('SELECT 1 FROM players WHERE phone_normalized = ?');
+    for (const [name, , , , phone] of DEMO_PLAYERS) {
+      const p = db.prepare('SELECT id FROM players WHERE is_demo = 1 AND first_name = ? AND phone_normalized IS NULL ORDER BY id LIMIT 1').get(name);
+      if (p && !taken.get(phone)) setPhone.run(phone, p.id);
+    }
+  },
 ];
 
-function openDatabase(file) {
+/** `untilVersion` sert uniquement aux tests de migration (ouvrir une base « ancienne version »). */
+function openDatabase(file, { untilVersion = MIGRATIONS.length } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-  migrate(db);
+  migrate(db, untilVersion);
   return db;
 }
 
-function migrate(db) {
+function migrate(db, untilVersion = MIGRATIONS.length) {
   const current = db.prepare('PRAGMA user_version').get().user_version;
-  for (let v = current; v < MIGRATIONS.length; v++) {
+  for (let v = current; v < Math.min(untilVersion, MIGRATIONS.length); v++) {
     db.exec('BEGIN');
     try {
       const m = MIGRATIONS[v];
@@ -252,20 +286,21 @@ function migrate(db) {
  *   P = présent, A = absent, - = pas inscrit
  */
 const DEMO_PLAYERS = [
-  ['Thomas', 'annual', 9, 'PPP'],   // Abonné annuel — 12 participations
-  ['Bastien', 'annual', 2, 'PAP'],  // Abonné annuel
-  ['Hugo', 'loyalty', 4, 'PPP'],    // Abonné fidélité — 7 participations
-  ['Antoine', 'none', 2, 'PPP'],    // Non abonné — 5 participations : prochaine inscription à 5 € (fidélité)
-  ['Maxime', 'none', 2, 'PAP'],     // Non abonné — 4 / 5
-  ['Lucas', 'none', 0, 'PPP'],      // Non abonné — 3 / 5
-  ['Julien', 'none', 0, 'P-P'],
-  ['Karim', 'none', 0, '-PP'],
-  ['Nico', 'none', 0, 'PP-'],
-  ['Romain', 'none', 0, 'PPP'],
-  ['Yanis', 'none', 0, 'P-P'],
-  ['Mehdi', 'none', 0, 'PPA'],
-  ['Pierre', 'none', 0, 'P--'],
-  ['Sam', 'none', 0, '-P-'],
+  // Numéros FICTIFS : plage 06 39 98 xx xx réservée par l'ARCEP aux œuvres de fiction / tests.
+  ['Thomas', 'annual', 9, 'PPP', '+33639980001'],   // Abonné annuel — 12 participations
+  ['Bastien', 'annual', 2, 'PAP', '+33639980002'],  // Abonné annuel
+  ['Hugo', 'loyalty', 4, 'PPP', '+33639980003'],    // Abonné fidélité — 7 participations
+  ['Antoine', 'none', 2, 'PPP', '+33639980004'],    // Non abonné — 5 participations : prochaine inscription à 5 € (fidélité)
+  ['Maxime', 'none', 2, 'PAP', '+33639980005'],     // Non abonné — 4 / 5
+  ['Lucas', 'none', 0, 'PPP', '+33639980006'],      // Non abonné — 3 / 5
+  ['Julien', 'none', 0, 'P-P', '+33639980007'],
+  ['Karim', 'none', 0, '-PP', '+33639980008'],
+  ['Nico', 'none', 0, 'PP-', '+33639980009'],
+  ['Romain', 'none', 0, 'PPP', '+33639980010'],
+  ['Yanis', 'none', 0, 'P-P', '+33639980011'],
+  ['Mehdi', 'none', 0, 'PPA', '+33639980012'],
+  ['Pierre', 'none', 0, 'P--', '+33639980013'],
+  ['Sam', 'none', 0, '-P-', '+33639980014'],
 ];
 
 /** Match de la semaine (phase Prioritaires) : seuls des prioritaires sont déjà inscrits. */
@@ -297,8 +332,9 @@ function seedDemo(db, { force = false } = {}) {
   db.exec('BEGIN');
   try {
     const ids = {};
-    for (const [name, sub, adj] of DEMO_PLAYERS) {
-      ids[name] = createPlayer(db, { first_name: name, season_id: seasonId, subscription: sub, adjustment: adj, is_demo: 1 });
+    for (const [name, sub, adj, , phone] of DEMO_PLAYERS) {
+      const free = !db.prepare('SELECT 1 FROM players WHERE phone_normalized = ?').get(phone);
+      ids[name] = createPlayer(db, { first_name: name, season_id: seasonId, subscription: sub, adjustment: adj, is_demo: 1, phone: free ? phone : null });
     }
     const subOf = Object.fromEntries(DEMO_PLAYERS.map(([n, s]) => [n, s]));
     const tierOf = (n) => (subOf[n] === 'none' ? 'standard' : subOf[n]);
@@ -365,6 +401,6 @@ module.exports = {
   createPlayer,
   ensureMatchLinks,
   currentSeasonId,
-  newPlayerCode,
+  DEMO_PLAYERS,
   seasonFor,
 };

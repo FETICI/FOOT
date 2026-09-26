@@ -12,7 +12,7 @@ Prérequis : **Node.js 22.13 ou plus récent**. Aucune dépendance, pas de `npm 
 
 ```bash
 npm start      # http://localhost:3000  et  http://localhost:3000/admin
-npm test       # 22 scénarios de tests automatiques
+npm test       # 29 scénarios de tests automatiques
 ```
 
 La base SQLite est créée dans `./data/foot.sqlite`. Une base existante (version précédente) est **migrée automatiquement** au démarrage, sans perte de données.
@@ -28,7 +28,7 @@ Match du vendredi 2 octobre 2026 en phase **Prioritaires** + 3 matchs d'historiq
 | Antoine | Non abonné | 5 → sa prochaine inscription passe à 5 € + Abonné fidélité | 5 € |
 | Maxime, Lucas… | Non abonné | 4/5, 3/5… | 10 € |
 
-Les codes joueurs sont visibles dans *Admin → Joueurs → fiche*. Tout se supprime en un clic dans *Réglages*.
+Les profils de démo ont des numéros **fictifs** (plage 06 39 98 xx xx réservée par l'ARCEP) : Thomas 06 39 98 00 01, Bastien …02, Hugo …03, Antoine …04, Maxime …05, Lucas …06… Tout se supprime en un clic dans *Réglages*.
 
 ## Semaine type
 
@@ -63,13 +63,17 @@ Les codes joueurs sont visibles dans *Admin → Joueurs → fiche*. Tout se supp
 
 Jetons de 256 bits aléatoires (43 caractères), stockés en base, régénérables depuis l'admin si un lien circule par erreur. Un lien inconnu, modifié ou d'un autre match affiche « Ce lien d'inscription n'est pas valide. » ; un lien valide utilisé trop tôt affiche « Les inscriptions ne sont pas encore ouvertes pour ce lien. »
 
-**« Es-tu abonné ? »** n'est qu'une déclaration : le statut réel vient de la fiche. Un « oui » non confirmé affiche « Ton statut abonné n'a pas été reconnu… » avec un bouton pour s'inscrire au tarif normal.
+**Identification : prénom + numéro de téléphone** (ni compte, ni mot de passe, ni SMS)
+- Le numéro est normalisé côté serveur (`06 12 34 56 78`, `06.12.34.56.78`, `+33 6 12…` → `+33612345678` ; numéros étrangers acceptés avec leur indicatif) et stocké dans `players.phone_normalized`, protégé par un **index UNIQUE SQLite** : 1 numéro = 1 fiche.
+- Numéro inconnu → nouvelle fiche Non abonné. Numéro connu → sa fiche (abonnement, participations, priorité, tarif).
+- Prénom très différent de celui enregistré pour ce numéro → « Ce numéro est déjà associé à un joueur… » (le prénom enregistré n'est jamais révélé). Majuscules, accents, espaces, initiale ajoutée ou une faute de frappe sont tolérés.
+- Homonymes : deux « Thomas » avec deux numéros = deux fiches distinctes.
+- Même joueur, même match → « Tu es déjà inscrit à ce foot ✅ » et sa confirmation est réaffichée.
+- Le téléphone du joueur retient localement son prénom et son numéro pour pré-remplir le formulaire (simple confort : le serveur vérifie toujours le numéro).
+- Admin → Joueurs : numéro visible et modifiable (normalisé, refusé s'il appartient déjà à une autre fiche → proposition de fusion), filtres « Numéro à renseigner » et « À vérifier ».
+- L'admin peut **fusionner** deux fiches (historique, présences, tarifs historiques, meilleur statut et numéro choisi regroupés, jamais un match compté deux fois).
 
-**Identification sans compte (homonymes)**
-- Première inscription : prénom seulement → une fiche est créée et le joueur reçoit un **code joueur à 4 chiffres**. Son téléphone est ensuite **reconnu automatiquement** (cookie sécurisé) : il n'a plus qu'à choisir carte/espèces.
-- Nouveau téléphone, ou abonné qui s'inscrit pour la première fois : prénom + code joueur (l'organisateur le voit dans la fiche).
-- Prénom déjà pris sans code : « ajoute l'initiale de ton nom (ex. Thomas B.) » → deux fiches, deux historiques, deux compteurs.
-- L'admin peut **fusionner** deux fiches (historique, présences, meilleur statut regroupés), renommer, régénérer un code, oublier les téléphones.
+**Anciennes fiches (avant la mise à jour)** : conservées telles quelles, sans numéro inventé, jamais fusionnées sur le prénom. Elles apparaissent en « Numéro à renseigner ». Si un ancien joueur s'inscrit avec son numéro avant que tu l'aies renseigné, une nouvelle fiche est créée au tarif normal et marquée « À vérifier » avec un bouton pour fusionner. 👉 **Renseigne en priorité le numéro de tes abonnés** pour qu'ils soient reconnus (et paient 5 €) dès leur prochaine inscription.
 - Un même joueur ne peut pas s'inscrire deux fois au même match ; « Inscrire un autre joueur » permet d'inscrire un ami depuis son téléphone.
 
 **Participations** = présences de la saison + correction manuelle éventuelle. Le compteur est **recalculé** à chaque lecture (jamais incrémenté), donc aucune présence ne peut compter deux fois et une correction Présent → Absent est immédiatement prise en compte.
@@ -96,8 +100,8 @@ Sauvegarde : copier `foot.sqlite`.
 ## Sécurité
 
 - Mot de passe admin haché (scrypt), jamais stocké en clair, 10 caractères minimum ; session signée en cookie HttpOnly, SameSite=Strict, Secure en HTTPS ; limitation des tentatives de connexion.
-- Cookie « téléphone reconnu » aléatoire (HttpOnly, SameSite=Lax), seule son empreinte SHA-256 est en base ; essais de code joueur limités.
-- API publiques : prénoms des inscrits et infos du match uniquement (ni paiement, ni statut, ni tarif des autres, ni jetons des autres liens, ni codes).
+- Numéros de téléphone visibles uniquement dans l'administration ; inscriptions limitées en fréquence par adresse IP.
+- API publiques : prénoms des inscrits et infos du match uniquement (ni paiement, ni statut, ni tarif des autres, ni numéros de téléphone, ni jetons des autres liens).
 - Requêtes SQL paramétrées ; le front-end construit le DOM avec `textContent` (aucune donnée utilisateur dans `innerHTML`) ; CSP stricte, `X-Frame-Options: DENY`.
 
 ## Architecture
@@ -106,11 +110,12 @@ Sauvegarde : copier `foot.sqlite`.
 server.js        routes HTTP (API publique /api/public, API admin /api/admin), fichiers statiques
 src/pricing.js   règles commerciales pures : tarifs, fidélité, priorité, phases/liens
 src/repo.js      règles métier + accès données (inscription, joueurs, fusion, saisons…)
-src/db.js        SQLite (node:sqlite), migrations versionnées (v1 → v2 automatique), démo
+src/db.js        SQLite (node:sqlite), migrations versionnées automatiques (v1 → v5), démo
+src/phone.js     normalisation des numéros de téléphone
 src/auth.js      mot de passe admin + session signée
 public/          page joueur (player.js) et administration (admin.js), JS natif
 test/            tests d'intégration de l'API (npm test)
 ```
 
-Tables : `matches`, `registrations` (tarif, statut abonné au moment de l'inscription, présence), `players`, `player_seasons` (abonnement et correction par saison), `player_devices`, `match_links`, `seasons`, `settings`.
+Tables : `matches`, `registrations` (tarif, statut abonné au moment de l'inscription, présence), `players` (numéro normalisé unique), `player_seasons` (abonnement et correction par saison), `match_links`, `seasons`, `settings`.
 Pistes suivantes : équipes / tirage (table `teams` reliée aux `registrations`), notifications (hook dans `registerPublic`), statistiques de présence (déjà calculables depuis `registrations.attendance`).

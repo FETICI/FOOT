@@ -66,7 +66,7 @@ Jetons de 256 bits aléatoires (43 caractères), stockés en base, régénérabl
 **Identification : prénom + numéro de téléphone** (ni compte, ni mot de passe, ni SMS)
 - Le numéro est normalisé côté serveur (`06 12 34 56 78`, `06.12.34.56.78`, `+33 6 12…` → `+33612345678` ; numéros étrangers acceptés avec leur indicatif) et stocké dans `players.phone_normalized`, protégé par un **index UNIQUE SQLite** : 1 numéro = 1 fiche.
 - Numéro inconnu → nouvelle fiche Non abonné. Numéro connu → sa fiche (abonnement, participations, priorité, tarif).
-- Prénom très différent de celui enregistré pour ce numéro → « Ce numéro est déjà associé à un joueur… » (le prénom enregistré n'est jamais révélé). Majuscules, accents, espaces, initiale ajoutée ou une faute de frappe sont tolérés.
+- Prénom très différent de celui enregistré pour ce numéro → « Ce numéro est déjà associé à un joueur… » (le prénom enregistré n’est jamais révélé) et aucune fiche n’est créée. Seules les différences de forme sont tolérées : majuscules/minuscules, accents, espaces superflus (« Thomas » = « thomas » = « Thómas », mais « Thomas B. » ou « Tom » sont refusés).
 - Homonymes : deux « Thomas » avec deux numéros = deux fiches distinctes.
 - Même joueur, même match → « Tu es déjà inscrit à ce foot ✅ » et sa confirmation est réaffichée.
 - Le téléphone du joueur retient localement son prénom et son numéro pour pré-remplir le formulaire (simple confort : le serveur vérifie toujours le numéro).

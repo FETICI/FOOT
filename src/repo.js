@@ -38,34 +38,23 @@ function defaultStatusFor(method) {
   return method === 'cash' ? 'cash_due' : 'to_pay';
 }
 
-/** Distance d'édition (petites fautes de frappe sur un prénom). */
-function levenshtein(a, b) {
-  const dp = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    let prev = dp[0];
-    dp[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      const tmp = dp[j];
-      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
-      prev = tmp;
-    }
-  }
-  return dp[b.length];
+/**
+ * Forme comparable d'un prénom : seules les différences de FORME sont neutralisées
+ * (majuscules/minuscules, accents, espaces superflus). Tout autre écart = autre prénom.
+ */
+function nameForm(name) {
+  return String(name ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-/**
- * Le prénom saisi correspond-il au prénom enregistré pour ce numéro ?
- * Tolère majuscules, accents, espaces, initiale ajoutée (« Thomas B. ») et une faute de frappe.
- */
+/** Le prénom saisi est-il le prénom enregistré pour ce numéro ? (« Thomas » = « thomas » = « Thómas », mais ≠ « Lucas », « Tom », « Thomas B. ») */
 function namesMatch(typed, stored) {
-  const a = normalizeName(typed);
-  const b = normalizeName(stored);
-  if (!a || !b) return false;
-  if (a === b || a.replace(/ /g, '') === b.replace(/ /g, '')) return true;
-  const fa = a.split(' ')[0];
-  const fb = b.split(' ')[0];
-  if (fa === fb) return true;
-  return Math.min(fa.length, fb.length) >= 4 && levenshtein(fa, fb) <= 1;
+  const a = nameForm(typed);
+  return a !== '' && a === nameForm(stored);
 }
 
 /** Normalise un numéro saisi ; erreur explicite sinon. */

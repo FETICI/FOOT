@@ -215,23 +215,53 @@ test('unicité : un numéro = une fiche, quelle que soit l’écriture ; deux Th
   assert.equal(karls.length, 1);
 });
 
-test('identification : prénom très différent refusé sans révéler le prénom enregistré ; petites variations acceptées', async (t) => {
+test('contrôle prénom + téléphone : seules casse, accents et espaces sont tolérés', async (t) => {
   const { admin, client, P } = await setup(t);
-  const m = await newMatch(admin, { status: 'open' });
+  const m = await newMatch(admin, { status: 'open', capacity: 30 });
   const tok = tokenOf(m, 'open');
-  const r = await reg(client(), m.match.id, { link_token: tok, first_name: 'Kevin', phone: P('Thomas').phone });
-  assert.equal(r.status, 409);
-  assert.equal(r.body.error, 'phone_name_mismatch');
-  assert.equal(r.body.message, 'Ce numéro est déjà associé à un joueur. Vérifie ton prénom ou contacte l’organisateur.');
-  assert.ok(!r.text.includes('Thomas'), 'le prénom associé n’est jamais révélé');
-  // Aucune fiche créée
-  assert.ok(!(await admin('GET', '/api/admin/players')).body.players.some((p) => p.first_name === 'Kevin'));
+  const count = async () => (await admin('GET', '/api/admin/players')).body.players.length;
+  const byPhone = async (phone) => (await admin('GET', '/api/admin/players')).body.players.filter((p) => p.phone === phone);
+  const MSG = 'Ce numéro est déjà associé à un joueur. Vérifie ton prénom ou contacte l’organisateur.';
 
-  for (const [variant, name] of [['  lucas ', 'Lucas'], ['HUGO', 'Hugo'], ['Antóine', 'Antoine'], ['Maxime D.', 'Maxime']]) {
-    const x = await reg(client(), m.match.id, { link_token: tok, first_name: variant, phone: P(name).phone });
-    assert.equal(x.status, 201, `${variant} ${JSON.stringify(x.body)}`);
-    assert.equal(x.body.created_player, false);
+  // Même numéro + même prénom → accepté, rattaché à la fiche existante
+  let r = await reg(client(), m.match.id, { link_token: tok, first_name: 'Thomas', phone: P('Thomas').phone });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.created_player, false);
+
+  // Même numéro + différence de casse / accent / espaces → accepté
+  for (const [variant, name] of [['lucas', 'Lucas'], ['HUGO', 'Hugo'], ['Antóine', 'Antoine'], ['  maxime  ', 'Maxime'], ['BASTÏEN', 'Bastien']]) {
+    r = await reg(client(), m.match.id, { link_token: tok, first_name: variant, phone: P(name).phone });
+    assert.equal(r.status, 201, `${variant} ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.created_player, false, variant);
+    assert.equal(r.body.registration.first_name, name, 'le prénom enregistré est conservé');
   }
+
+  // Même numéro + autre prénom → refusé, message exact, prénom enregistré jamais révélé
+  const before = await count();
+  const karim = P('Karim');
+  for (const other of ['Lucas', 'Kevin', 'Karima', 'Karim B.', 'Kar im']) {
+    r = await reg(client(), m.match.id, { link_token: tok, first_name: other, phone: karim.phone });
+    assert.equal(r.status, 409, other);
+    assert.equal(r.body.error, 'phone_name_mismatch', other);
+    assert.equal(r.body.message, MSG);
+    assert.ok(!r.text.includes('Karim"') && !/"first_name"/.test(r.text), 'aucun prénom renvoyé');
+    // Même numéro écrit autrement : même contrôle
+    r = await reg(client(), m.match.id, { link_token: tok, first_name: other, phone: karim.phone.replace('+33', '0') });
+    assert.equal(r.body.error, 'phone_name_mismatch');
+  }
+
+  // Aucun doublon : pas de nouvelle fiche, le numéro reste à une seule fiche, aucune inscription ajoutée pour Karim
+  assert.equal(await count(), before);
+  const owners = await byPhone(karim.phone);
+  assert.equal(owners.length, 1);
+  assert.equal(owners[0].first_name, 'Karim');
+  const regs = (await admin('GET', `/api/admin/matches/${m.match.id}`)).body.registrations;
+  assert.ok(!regs.some((x) => x.player_id === karim.id));
+  assert.equal(regs.length, 6);
+
+  // La page de confirmation (lookup) applique le même contrôle
+  const l = await client().call('POST', `/api/public/matches/${m.match.id}/lookup`, { link_token: tok, first_name: 'Lucas', phone: P('Thomas').phone });
+  assert.equal(l.body.registration, null);
 });
 
 test('double inscription : même joueur + même match refusé, sa confirmation est renvoyée', async (t) => {

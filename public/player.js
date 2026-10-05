@@ -124,7 +124,7 @@
 
     children.push(h('fieldset.field.plain', [
       h('legend.label', 'Mode de paiement'),
-      choiceButtons('payment_method', f.method, [['card', '💳', 'Payer par carte', 'Lien de paiement'], ['cash', '💶', 'Payer en espèces', 'Sur place']], (val) => {
+      choiceButtons('payment_method', f.method, [['card', '💳', 'Payer par carte', 'Paiement immédiat'], ['cash', '💶', 'Payer en espèces', 'Sur place']], (val) => {
         f.method = val; clearError(); syncSubmit();
       }),
     ]));
@@ -293,9 +293,10 @@
     if (!canSubmit()) return;
     const f = state.form;
     const forOther = state.forOther;
+    let redirecting = false;
     state.submitting = true;
     const btn = document.getElementById('submit');
-    if (btn) { btn.disabled = true; btn.replaceChildren(h('span.spinner'), 'Inscription…'); }
+    if (btn) { btn.disabled = true; btn.replaceChildren(h('span.spinner'), f.method === 'card' ? 'Redirection vers le paiement…' : 'Inscription…'); }
 
     try {
       const res = await api('POST', `/api/public/matches/${d().match.id}/registrations`, {
@@ -313,12 +314,20 @@
       if (navigator.vibrate) navigator.vibrate(30);
       render();
       window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Paiement par carte : on envoie directement le joueur sur le lien de paiement (même onglet,
+      // pour ne pas être bloqué par le navigateur). Au retour, la confirmation et le bouton
+      // « Payer par carte » restent affichés au cas où le paiement n'aurait pas été terminé.
+      if (res.registration && res.registration.payment_method === 'card' && res.payment_link) {
+        redirecting = true;
+        window.location.assign(res.payment_link);
+        return;
+      }
     } catch (err) {
       handleError(err, forOther);
     } finally {
       state.submitting = false;
       const b = document.getElementById('submit');
-      if (b) { b.replaceChildren('Je m’inscris'); syncSubmit(); }
+      if (b && !redirecting) { b.replaceChildren('Je m’inscris'); syncSubmit(); }
     }
   }
 

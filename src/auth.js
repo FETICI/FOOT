@@ -22,36 +22,38 @@ function verifyPassword(pw, stored) {
 
 const b64 = (s) => Buffer.from(s).toString('base64url');
 
-function createAuth(db) {
+async function createAuth(pool) {
   // Secret de signature des sessions, généré une fois et conservé en base.
-  let secret = getSetting(db, 'session_secret');
+  let secret = await getSetting(pool, 'session_secret');
   if (!secret) {
     secret = crypto.randomBytes(32).toString('hex');
-    setSetting(db, 'session_secret', secret);
+    await setSetting(pool, 'session_secret', secret);
   }
-  // Mot de passe initial : variable d'environnement ADMIN_PASSWORD, sinon valeur provisoire.
-  // RESET_ADMIN_PASSWORD=1 permet de repartir de ADMIN_PASSWORD en cas d'oubli.
-  if (!getSetting(db, 'admin_password_hash') || process.env.RESET_ADMIN_PASSWORD === '1') {
-    setSetting(db, 'admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || DEFAULT_PASSWORD));
-    setSetting(db, 'admin_password_is_default', process.env.ADMIN_PASSWORD ? '0' : '1');
-    setSetting(db, 'session_version', String(Number(getSetting(db, 'session_version', '0')) + 1));
+  // Mot de passe initial
+  if (!await getSetting(pool, 'admin_password_hash') || process.env.RESET_ADMIN_PASSWORD === '1') {
+    await setSetting(pool, 'admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || DEFAULT_PASSWORD));
+    await setSetting(pool, 'admin_password_is_default', process.env.ADMIN_PASSWORD ? '0' : '1');
+    const v = await getSetting(pool, 'session_version', '0');
+    await setSetting(pool, 'session_version', String(Number(v) + 1));
   }
 
   const sign = (payload) => crypto.createHmac('sha256', secret).update(payload).digest('base64url');
 
-  function issue() {
-    const payload = b64(JSON.stringify({ exp: Date.now() + SESSION_DAYS * 864e5, v: getSetting(db, 'session_version', '1') }));
+  async function issue() {
+    const v = await getSetting(pool, 'session_version', '1');
+    const payload = b64(JSON.stringify({ exp: Date.now() + SESSION_DAYS * 864e5, v }));
     return `${payload}.${sign(payload)}`;
   }
 
-  function check(cookieValue) {
+  async function check(cookieValue) {
     if (!cookieValue || !cookieValue.includes('.')) return false;
     const [payload, sig] = cookieValue.split('.');
     const expected = sign(payload);
     if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
     try {
       const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
-      return data.exp > Date.now() && data.v === getSetting(db, 'session_version', '1');
+      const v = await getSetting(pool, 'session_version', '1');
+      return data.exp > Date.now() && data.v === v;
     } catch {
       return false;
     }
@@ -60,19 +62,23 @@ function createAuth(db) {
   return {
     COOKIE,
     maxAge: SESSION_DAYS * 86400,
-    login(password) {
-      return verifyPassword(password, getSetting(db, 'admin_password_hash')) ? issue() : null;
+    async login(password) {
+      const hash = await getSetting(pool, 'admin_password_hash');
+      return verifyPassword(password, hash) ? issue() : null;
     },
     check,
-    isDefaultPassword: () => getSetting(db, 'admin_password_is_default') === '1',
-    changePassword(current, next) {
-      if (!verifyPassword(current, getSetting(db, 'admin_password_hash'))) return { ok: false, error: 'Mot de passe actuel incorrect.' };
+    async isDefaultPassword() {
+      return (await getSetting(pool, 'admin_password_is_default')) === '1';
+    },
+    async changePassword(current, next) {
+      const hash = await getSetting(pool, 'admin_password_hash');
+      if (!verifyPassword(current, hash)) return { ok: false, error: 'Mot de passe actuel incorrect.' };
       if (typeof next !== 'string' || next.length < 10) return { ok: false, error: 'Le nouveau mot de passe doit faire au moins 10 caractères.' };
-      setSetting(db, 'admin_password_hash', hashPassword(next));
-      setSetting(db, 'admin_password_is_default', '0');
-      // Invalide toutes les autres sessions
-      setSetting(db, 'session_version', String(Number(getSetting(db, 'session_version', '1')) + 1));
-      return { ok: true, token: issue() };
+      await setSetting(pool, 'admin_password_hash', hashPassword(next));
+      await setSetting(pool, 'admin_password_is_default', '0');
+      const v = await getSetting(pool, 'session_version', '1');
+      await setSetting(pool, 'session_version', String(Number(v) + 1));
+      return { ok: true, token: await issue() };
     },
   };
 }

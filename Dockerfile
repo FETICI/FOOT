@@ -1,13 +1,11 @@
 FROM node:22-alpine
 WORKDIR /app
 COPY package.json ./
+RUN npm install --production
 COPY server.js ./
 COPY src ./src
 COPY public ./public
 ENV NODE_ENV=production \
-    PORT=3000 \
-    DATA_DIR=/data
-# Le stockage persistant est monté par Railway sur /data (aucune directive de volume dans l'image).
-RUN mkdir -p /data
+    PORT=3000
 EXPOSE 3000
-CMD ["node", "--disable-warning=ExperimentalWarning", "server.js"]
+CMD ["node", "server.js"]

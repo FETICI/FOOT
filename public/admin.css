@@ -349,3 +349,9 @@ dialog.sheet[open] { animation: sheet-in 0.22s ease-out; }
 .review-card { border-color: var(--warn-line); }
 .pick-phone { font-weight: 500; color: var(--muted); font-size: 13px; }
 .page-head .sub .phone { font-size: 15px; }
+
+/* ================= Équipes ================= */
+.team-block { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 12px; background: var(--bg-2); margin-bottom: 4px; }
+.team-block .row { gap: 8px; }
+.team-players { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.team-players li { background: var(--bg-3); border-radius: 20px; padding: 3px 10px; font-size: 13px; font-weight: 600; }

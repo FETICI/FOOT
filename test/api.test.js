@@ -1,24 +1,28 @@
 'use strict';
 // Tests d'intégration : `npm test`
+// Nécessite une base PostgreSQL : DATABASE_URL doit être défini.
+// Les tests sont ignorés si DATABASE_URL est absent.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
-const os = require('node:os');
-const fs = require('node:fs');
-const path = require('node:path');
+
+if (!process.env.DATABASE_URL) {
+  console.log('⚠️  DATABASE_URL non défini — tests d'intégration ignorés.');
+  console.log('   Pour les lancer : DATABASE_URL=postgres://... npm test');
+  process.exit(0);
+}
 
 process.env.ADMIN_PASSWORD = 'secret-test-password';
 const { createApp } = require('../server');
-const { openDatabase, seedDemo, createPlayer, currentSeasonId, ensureMatchLinks } = require('../src/db');
 const { normalizePhone } = require('../src/phone');
 
 /* =========================================================
    Outils
    ========================================================= */
 
-async function startServer({ dbFile } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fdv-'));
-  const server = http.createServer(createApp({ dbFile: dbFile || path.join(dir, 'test.sqlite'), seed: true }));
+async function startServer() {
+  const handler = await createApp({ seed: true });
+  const server = http.createServer(handler);
   await new Promise((r) => server.listen(0, r));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -51,8 +55,8 @@ async function startServer({ dbFile } = {}) {
   return { server, client, admin: admin.call, base };
 }
 
-async function setup(t, opts) {
-  const ctx = await startServer(opts);
+async function setup(t) {
+  const ctx = await startServer();
   t.after(() => ctx.server.close());
   const { admin } = ctx;
   const players = (await admin('GET', '/api/admin/players')).body.players;
@@ -695,75 +699,7 @@ test('saisons : nouvelle saison = compteurs à zéro, anciennes données conserv
   assert.equal(thomas.history.length, thomasBefore.history.length);
 });
 
-/* =========================================================
-   Migration (ancienne base avec code joueur)
-   ========================================================= */
-
-test('migration : fiches à code conservées sans numéro inventé, jamais fusionnées par prénom', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fdv-mig-'));
-  const file = path.join(dir, 'old.sqlite');
-
-  // 1. Base « version précédente » (schéma v4, avec la colonne code), données réelles
-  let db = openDatabase(file, { untilVersion: 4 });
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
-  assert.ok(db.prepare('PRAGMA table_info(players)').all().some((c) => c.name === 'code'));
-  const sid = currentSeasonId(db);
-  const t1 = createPlayer(db, { first_name: 'Thomas', season_id: sid, subscription: 'annual', adjustment: 3 });
-  const t2 = createPlayer(db, { first_name: 'Thomas', season_id: sid, subscription: 'none' });
-  const mid = Number(db.prepare(`INSERT INTO matches (date, time, location, price_cents, subscriber_price_cents, capacity, status, season_id)
-                                 VALUES ('2026-09-18', '20:00', 'Five', 1000, 500, 14, 'closed', ?)`).run(sid).lastInsertRowid);
-  ensureMatchLinks(db, mid);
-  const ins = db.prepare(`INSERT INTO registrations (match_id, player_id, first_name, name_key, payment_method, payment_status, token, price_cents, tier, attendance)
-                          VALUES (?, ?, 'Thomas', 'thomas', ?, ?, 'x', ?, ?, 'present')`);
-  ins.run(mid, t1, 'card', 'paid', 500, 'annual');
-  ins.run(mid, t2, 'cash', 'cash_due', 1000, 'standard');
-  const codes = db.prepare('SELECT code FROM players').all().map((r) => r.code);
-  assert.ok(codes.every((c) => /^\d{4}$/.test(c)));
-  db.close();
-
-  // 2. Démarrage de la nouvelle version sur cette base
-  const ctx = await startServer({ dbFile: file });
-  t.after(() => ctx.server.close());
-  const { admin, client } = ctx;
-  db = openDatabase(file);
-  assert.ok(!db.prepare('PRAGMA table_info(players)').all().some((c) => c.name === 'code'), 'colonne code supprimée');
-  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_players_phone' AND sql LIKE '%UNIQUE%'").get(), 'index UNIQUE sur le numéro');
-  db.close();
-
-  const players = (await admin('GET', '/api/admin/players')).body.players;
-  const thomas = players.filter((p) => p.first_name === 'Thomas');
-  assert.equal(thomas.length, 2, 'les deux anciennes fiches Thomas restent séparées');
-  assert.ok(thomas.every((p) => p.phone === null && p.missing_phone), 'aucun numéro inventé');
-  const a = thomas.find((p) => p.id === t1);
-  assert.equal(a.subscription, 'annual');
-  assert.equal(a.participations, 4, '1 présence + 3 participations antérieures');
-  const hist = (await admin('GET', `/api/admin/players/${t1}`)).body.history;
-  assert.equal(hist.length, 1);
-  assert.equal(hist[0].price_cents, 500);
-  assert.equal(hist[0].payment_status, 'paid');
-  const matchView = (await admin('GET', `/api/admin/matches/${mid}`)).body;
-  assert.equal(matchView.registrations.length, 2, 'inscriptions conservées');
-  assert.ok(!JSON.stringify(players).includes('"code"'));
-
-  // 3. Un ancien joueur sans numéro s'inscrit : nouvelle fiche à vérifier, pas de rattachement automatique
-  const m = await newMatch(admin, { status: 'open' });
-  const r = await reg(client(), m.match.id, { link_token: tokenOf(m, 'open'), first_name: 'Thomas', phone: '06 55 44 33 22' });
-  assert.equal(r.status, 201);
-  assert.equal(r.body.created_player, true);
-  assert.equal(r.body.registration.price_cents, 1000);
-  const after = (await admin('GET', '/api/admin/players')).body.players.filter((p) => p.first_name === 'Thomas');
-  assert.equal(after.length, 3);
-  assert.ok(after.find((p) => p.phone === '+33655443322').needs_review);
-
-  // 4. L'organisateur renseigne le numéro de l'ancienne fiche abonnée : elle est ensuite reconnue
-  const set = await admin('PATCH', `/api/admin/players/${t2}`, { phone: '06 11 22 33 44' });
-  assert.equal(set.body.player.phone, '+33611223344');
-  const m2 = await newMatch(admin, { status: 'open', date: '2099-06-12' });
-  await admin('PATCH', `/api/admin/players/${t1}`, { phone: '0612121212' });
-  const r2 = await reg(client(), m2.match.id, { link_token: tokenOf(m2, 'open'), first_name: 'Thomas', phone: '06 12 12 12 12' });
-  assert.equal(r2.body.created_player, false);
-  assert.equal(r2.body.registration.price_cents, 500, 'abonné reconnu par son numéro');
-});
+// NOTE : le test de migration SQLite → supprimé (base PostgreSQL, pas de migration de schéma versionné).
 
 test('démo : numéros fictifs attribués uniquement aux profils de démonstration', async (t) => {
   const { P } = await setup(t);

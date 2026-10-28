@@ -559,6 +559,7 @@
     }
     parts.push(playersCard(v, rerender));
     if (!m.is_past) parts.push(revenueCard(v));
+    parts.push(teamsCard(v.match.id, v.registrations, rerender));
     if (current) {
       parts.push(h('a.btn.btn-ghost.btn-block', { href: '#/new', style: 'min-height:60px' }, [icon('calendar'), 'Créer le prochain foot']));
     }
@@ -1106,6 +1107,106 @@
       ]);
       return [h('h2.sheet-title', 'Nouvelle saison'), form];
     });
+  }
+
+  /* =========================================================
+     Section équipes
+     ========================================================= */
+
+  const TEAM_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e', '#e91e63', '#00bcd4'];
+
+  function teamsCard(matchId, registrations, rerender) {
+    const el = h('section.card.stack');
+    let currentTeams = null; // null = non chargé, [] = pas d'équipes
+
+    const draw = () => {
+      const title = h('div.row.between', [
+        h('h2.section-title', 'Équipes'),
+        currentTeams !== null && currentTeams.length > 0
+          ? h('button.btn.btn-sm.btn-ghost', { type: 'button', onclick: deleteTeams }, [icon('trash'), 'Supprimer'])
+          : null,
+      ]);
+
+      if (currentTeams === null) {
+        // encore en chargement
+        el.replaceChildren(title, h('p.muted', 'Chargement…'));
+        return;
+      }
+
+      if (currentTeams.length === 0) {
+        // Pas encore d'équipes — montrer le tirage
+        const numSel = h('select.input', { style: 'width:auto' },
+          ...Array.from({ length: 9 }, (_, i) => {
+            const n = i + 2;
+            const opt = document.createElement('option');
+            opt.value = String(n);
+            opt.textContent = `${n} équipes`;
+            if (n === 2) opt.selected = true;
+            return opt;
+          })
+        );
+        const drawBtn = h('button.btn.btn-primary', { type: 'button', onclick: () => drawTeams(Number(numSel.value)) }, [icon('shuffle'), 'Tirer au sort']);
+        el.replaceChildren(title,
+          h('p.muted', `${registrations.length} joueur${registrations.length > 1 ? 's' : ''} inscrit${registrations.length > 1 ? 's' : ''}.`),
+          h('div.row', [numSel, drawBtn])
+        );
+        return;
+      }
+
+      // Afficher les équipes + boutons édition
+      const teamsEls = currentTeams.map((team, ti) => {
+        const nameIn = h('input.input.small', { value: team.name, maxlength: 30, 'aria-label': `Nom équipe ${ti + 1}` });
+        const colorIn = h('input', { type: 'color', value: team.color, style: 'width:36px;height:36px;border:none;cursor:pointer;border-radius:6px;padding:2px', 'aria-label': 'Couleur' });
+        nameIn.addEventListener('input', () => { currentTeams[ti].name = nameIn.value; });
+        colorIn.addEventListener('input', () => { currentTeams[ti].color = colorIn.value; });
+        return h('div.team-block', { style: `border-left:4px solid ${team.color};padding-left:12px` }, [
+          h('div.row', [colorIn, nameIn]),
+          h('ul.team-players', team.players.map((p) => h('li', p))),
+        ]);
+      });
+
+      const saveBtn = h('button.btn.btn-primary.btn-sm', { type: 'button', onclick: saveTeams }, [icon('check'), 'Enregistrer']);
+      const redrawBtn = h('button.btn.btn-sm.btn-ghost', { type: 'button', onclick: () => { currentTeams = []; draw(); } }, [icon('shuffle'), 'Nouveau tirage']);
+
+      el.replaceChildren(title, ...teamsEls, h('div.row', [redrawBtn, saveBtn]));
+    };
+
+    const drawTeams = async (numTeams) => {
+      try {
+        const r = await api('POST', `/api/admin/matches/${matchId}/teams/draw`, { num_teams: numTeams });
+        currentTeams = r.teams;
+        draw();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+
+    const saveTeams = async () => {
+      try {
+        const r = await api('PATCH', `/api/admin/matches/${matchId}/teams`, { teams: currentTeams });
+        currentTeams = r.teams;
+        toast('Équipes enregistrées ✅');
+        draw();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+
+    const deleteTeams = async () => {
+      const ok = await confirmSheet({ title: 'Supprimer les équipes ?', message: 'Les équipes de ce match seront effacées.', confirmLabel: 'Supprimer' });
+      if (!ok) return;
+      try {
+        await api('DELETE', `/api/admin/matches/${matchId}/teams`);
+        currentTeams = [];
+        toast('Équipes supprimées');
+        draw();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+
+    // Charger les équipes existantes dès l'affichage
+    draw(); // affiche "Chargement…"
+    api('GET', `/api/admin/matches/${matchId}/teams`).then((r) => {
+      currentTeams = r.teams || [];
+      draw();
+    }).catch(() => { currentTeams = []; draw(); });
+
+    return el;
   }
 
   /* =========================================================
